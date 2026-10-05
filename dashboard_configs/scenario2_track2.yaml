@@ -1,0 +1,37 @@
+# scenario2_track2.yaml
+# Number Matching: Qlik 37681c3d <-> PBI b6da800f (CSV-backed)
+
+scenario: 2
+track: 2
+description: "Number Matching - Pipeline Hygiene Track 2 (CSV source)"
+
+qlik:
+  tenant: "5wnjr4er56khtqe.in.qlikcloud.com"
+  app_id: "37681c3d-4b65-46a0-9a69-d60544c8c1c2"
+  base_url: "https://5wnjr4er56khtqe.in.qlikcloud.com"
+  primary_sheet_id: "ec6922ca-7f1b-4766-9066-38074d8849ca"
+  session_file: "playwright/.auth/qlik_session.json"
+
+pbi:
+  tenant_id: "b5af2451-e21b-4aa2-b4b5-dc5907908dd8"
+  report_id: "b6da800f-28c2-4f6c-ad9b-b28869e54da3"
+  report_url: "https://app.powerbi.com/groups/me/reports/b6da800f-28c2-4f6c-ad9b-b28869e54da3/p20?ctid=b5af2451-e21b-4aa2-b4b5-dc5907908dd8&experience=power-bi"
+  session_file: "playwright/.auth/pbi_session.json"
+
+data_source:
+  type: csv
+  csv_dir: "Pipeline Hygiene - Subset for Auto Track Scenario2 "
+  fact_table: "facts.csv"
+  dimensions:
+    - file: "Account.csv"
+      key: "%Customer Key"
+    - file: "Territory.csv"
+      key: "%Customer Key"
+    - file: "Country.csv"
+      key: "%Country ID"
+    - file: "Pipeline_dimension.csv"
+      key: "%Opportunity ID"
+    - file: "Product.csv"
+      key: "%Product Key"
+    - file: "calendar.csv"
+      key: "%Date"

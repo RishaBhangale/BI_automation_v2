@@ -1,0 +1,26 @@
+# Auth sessions — contain cookies/tokens, NEVER commit
+playwright/.auth/*.json
+
+# Secrets
+.env
+
+# Large dataset folders and CSVs
+Pipeline Hygiene - Subset for Auto Track Scenario2*/
+*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Pytest
+.pytest_cache/
+
+# Output
+logs/
+screenshots/
+reports/
+
+# macOS
+.DS_Store

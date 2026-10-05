@@ -1,0 +1,31 @@
+# scenario1_track1.yaml
+# Functional Parity: Qlik 6f0756c3 <-> PBI 2321717b
+
+scenario: 1
+track: 1
+description: "Functional Parity - Pipeline Hygiene Main (Track 1)"
+
+qlik:
+  tenant: "5wnjr4er56khtqe.in.qlikcloud.com"
+  app_id: "6f0756c3-f251-45d9-b569-868b8191798e"
+  base_url: "https://5wnjr4er56khtqe.in.qlikcloud.com"
+  primary_sheet_id: "ec6922ca-7f1b-4766-9066-38074d8849ca"
+  session_file: "playwright/.auth/qlik_session.json"
+
+pbi:
+  tenant_id: "b5af2451-e21b-4aa2-b4b5-dc5907908dd8"
+  report_id: "2321717b-8815-48c1-8065-0b8747ca83d7"
+  report_url: "https://app.powerbi.com/groups/me/reports/2321717b-8815-48c1-8065-0b8747ca83d7/1523bb40960e2dbc7823?ctid=b5af2451-e21b-4aa2-b4b5-dc5907908dd8&experience=power-bi"
+  session_file: "playwright/.auth/pbi_session.json"
+
+# Qlik sheet -> PBI page name mapping
+# These are GUESSES based on screenshots — must be confirmed with migration team
+# Run Cat A tests first to discover actual names, then update this mapping
+sheet_page_mapping:
+  "Pipeline Hygiene IDG": "Pipeline Hygiene IDG"
+  "Overdue Opportunities": "Overdue Opportunities ISG"
+  "7 Days Opportunities": "7 Days Opportunities ISG"
+  "Missing PN Opportunities": "Missing PN Opportunities ISG"
+  "Overloaded Contracts": "Overloaded Contracts ISG"
+  "Next QTR Opportunities Unweighted": "Next QTR Opp Unweighted ISG"
+  "Next QTR Opportunities Weighted": "Next QTR Opp Weighted ISG"
