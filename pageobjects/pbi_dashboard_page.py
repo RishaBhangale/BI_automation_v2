@@ -313,8 +313,11 @@ class PBIDashboardPage(BasePage):
             pass
 
         try:
-            # 3. Locate tab element
+            # 3. Locate tab element (exact match first, then partial match)
             tab = ctx.locator(
+                f"button:text-is('{page_name}'), "
+                f"button[aria-label='{page_name}'], "
+                f"[role='tab'][aria-label='{page_name}'], "
                 f"button[data-testid='pages-navigation-list-items'][aria-label*='{page_name}' i], "
                 f"button[aria-label*='{page_name}' i], "
                 f"[role='tab'][aria-label*='{page_name}' i], "
@@ -859,17 +862,23 @@ class PBIDashboardPage(BasePage):
         try:
             # 1. Deselect any active canvas visual so 'Filters on this page' is shown
             self.page.keyboard.press("Escape")
-            self.page.wait_for_timeout(300)
+            self.page.wait_for_timeout(200)
             try:
-                self.page.mouse.click(100, 150)
+                self.page.evaluate("""() => {
+                    const canvas = document.querySelector('.displayAreaContainer')
+                                || document.querySelector('.exploreCanvas')
+                                || document.querySelector('.canvasFlexBox');
+                    if (canvas) {
+                        canvas.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                    }
+                }""")
                 self.page.wait_for_timeout(300)
             except Exception:
                 pass
 
-            # 2. Check if Filters Pane container is present
-            fp = self.page.locator(".filterPaneModern, [data-automation-type='filterPane'], section.filterPane-FlexWrapper").first
+            # 2. Check if Filters Pane container is present, expand if collapsed
+            fp = self.page.locator(".filterPaneModern, [data-automation-type='filterPane'], section.filterPane-FlexWrapper, article.outspacePane").first
             if fp.count() == 0 or not fp.is_visible(timeout=1_000):
-                # Try expanding pane if collapsed
                 expand_btn = self.page.locator(
                     "button[aria-label*='Expand Filters' i], "
                     "button[title*='Expand Filters' i], "
@@ -884,18 +893,38 @@ class PBIDashboardPage(BasePage):
             filter_card = None
             for tok in tokens:
                 card = self.page.locator(
-                    f"filter[data-automation-type='filterCard']:has([data-testid='filter-card-title']:has-text('{tok}')), "
-                    f"filter[data-automation-type='filterCard']:has(.textLabel:has-text('{tok}')), "
+                    f"[data-automation-type='filterCard']:has([data-testid='filter-card-title']:has-text('{tok}')), "
+                    f"[data-automation-type='filterCard']:has(.textLabel:has-text('{tok}')), "
                     f"[data-automation-type='filterCard']:has-text('{tok}')"
                 ).first
-                if card.count() > 0 and card.is_visible(timeout=800):
+                if card.count() > 0 and card.is_visible(timeout=600):
                     filter_card = card
                     log.info(f"Matched filter card in Filters Pane with token '{tok}'")
                     break
 
+            # If not found immediately, try using the Filters Pane search box
+            if not filter_card:
+                top_search = self.page.locator(
+                    "article.outspacePane input[aria-label*='Search Filters' i], "
+                    ".filterPaneModern input[placeholder*='Search' i], "
+                    "mat-form-field.searchBox input"
+                ).first
+                if top_search.count() > 0 and top_search.is_visible(timeout=500):
+                    try:
+                        top_search.fill(slicer_name)
+                        self.page.wait_for_timeout(500)
+                        card = self.page.locator("[data-automation-type='filterCard']").first
+                        if card.count() > 0 and card.is_visible(timeout=600):
+                            filter_card = card
+                            log.info(f"Matched filter card via Filters Pane search box: '{slicer_name}'")
+                    except Exception:
+                        pass
+
             if not filter_card:
                 log.debug(f"No filter card matching '{slicer_name}' found in Filters Pane")
                 return False
+
+            filter_card.scroll_into_view_if_needed()
 
             # 4. Expand card if collapsed
             collapse_btn = filter_card.locator("button.collapse, button[aria-label*='Expand or collapse' i]").first
