@@ -32,6 +32,6 @@ data_source:
     - file: "Pipeline_dimension.csv"
       key: "%Opportunity ID"
     - file: "Product.csv"
-      key: "%Product Key"
+      key: "%Original Product ID"
     - file: "calendar.csv"
       key: "%Date"

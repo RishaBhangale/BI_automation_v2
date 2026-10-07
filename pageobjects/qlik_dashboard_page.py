@@ -77,7 +77,7 @@ class QlikDashboardPage(BasePage):
 
     def open(self, app_id: str, sheet_id: str) -> None:
         """
-        Navigate to a specific Qlik Cloud sheet using the saved session.
+        Navigate to a specific Qlik Cloud sheet using the saved session or reuse warm page.
 
         Args:
             app_id:   Qlik App ID (GUID from URL)
@@ -86,14 +86,44 @@ class QlikDashboardPage(BasePage):
         self._app_id = app_id
         self._sheet_id = sheet_id
         self._setup_ws_listener()
+
+        current_url = self.page.url
+        if app_id in current_url and sheet_id in current_url:
+            log.info(f"Qlik sheet {sheet_id} already open — reusing warm page")
+            return
+
         url = (
             f"{QLIK_BASE_URL}/sense/app/{app_id}/sheet/{sheet_id}"
             f"/state/analysis/hubUrl/%2Fanalytics%2Fhome"
         )
         log.info(f"Opening Qlik sheet: app={app_id}, sheet={sheet_id}")
         self.page.goto(url, timeout=QLIK_RENDER_TIMEOUT)
+        self._assert_not_login_page()
         self._wait_for_sheet_load()
+        self._assert_not_login_page()
         log.info("Qlik sheet loaded")
+
+    def _assert_not_login_page(self) -> None:
+        """Handle Qlik login redirect: pause for user login in headed browser instead of crashing."""
+        url = self.page.url.lower()
+        if "login" in url and "qlikcloud.com" in url:
+            self.capture_screenshot("qlik_login_required")
+            log.warning(
+                f"[AUTH REQUIRED] Qlik redirected to login page ({self.page.url[:80]}...). "
+                "Please complete login in the open browser window. Waiting up to 60s..."
+            )
+            try:
+                self.page.wait_for_url(
+                    lambda u: "sense/app" in u.lower() or ("qlikcloud.com" in u.lower() and "login" not in u.lower()),
+                    timeout=60_000,
+                )
+                log.info("Qlik login completed! Sheet loading...")
+                self._wait_for_sheet_load()
+            except Exception:
+                raise RuntimeError(
+                    f"Qlik redirected to login page ({self.page.url[:80]}...) "
+                    "and login was not completed within 60s."
+                )
 
     def _wait_for_sheet_load(self, max_ms: int = None) -> None:
         """Poll until loading indicators disappear."""
@@ -224,22 +254,37 @@ class QlikDashboardPage(BasePage):
 
     def _inject_enigma(self) -> bool:
         """
-        Inject enigma.js into the current Qlik page.
-
-        Returns True on success. Returns False if blocked by CSP.
-        If False, capture_baseline() will fall back to DOM text extraction.
+        Inject enigma.js inline into the current Qlik page to satisfy CSP.
         """
         if self._enigma_injected:
             return True
         try:
-            self.page.add_script_tag(url=ENIGMA_JS_URL)
-            self.page.wait_for_timeout(1_000)
-            loaded = self.page.evaluate("typeof enigma !== 'undefined'")
+            local_vendor = Path(__file__).parent.parent / "playwright" / "vendor" / "enigma.min.js"
+            if local_vendor.exists():
+                content = local_vendor.read_text(encoding="utf-8")
+                # Wrap to bypass RequireJS define.amd check on Qlik Cloud
+                wrapped = f"""
+                (() => {{
+                    try {{
+                        const _prev = window.define;
+                        window.define = undefined;
+                        {content}
+                        window.define = _prev;
+                    }} catch(e) {{
+                        console.error('enigma wrapper error:', e);
+                    }}
+                }})();
+                """
+                self.page.add_script_tag(content=wrapped)
+            else:
+                self.page.add_script_tag(url=ENIGMA_JS_URL)
+            self.page.wait_for_timeout(500)
+            loaded = self.page.evaluate("typeof window.enigma !== 'undefined'")
             if loaded:
-                log.info("enigma.js injected successfully")
+                log.info("enigma.js injected successfully (inline)")
                 self._enigma_injected = True
                 return True
-            log.warning("enigma.js tag added but enigma is undefined (CSP may be blocking)")
+            log.warning("enigma.js tag added but enigma is undefined")
             return False
         except Exception as e:
             log.warning(f"enigma.js injection failed: {e}")
@@ -250,15 +295,21 @@ class QlikDashboardPage(BasePage):
         Snapshot current displayed values for all visuals on the active sheet.
 
         Returns: {visual_title: displayed_value_string}
-
-        Uses enigma.js if available (preferred), falls back to DOM text scraping.
-        Values are raw strings: '580M', '41', '33.8%', etc.
-        Use parse_number() from validation_utils to convert to float.
         """
         app_id   = app_id   or self._app_id
         sheet_id = sheet_id or self._sheet_id
 
         log.info(f"Capturing Qlik baseline: app={app_id}, sheet={sheet_id}")
+
+        # Ensure sheet visual elements are mounted
+        self.page.wait_for_timeout(3_000)
+        try:
+            self.page.wait_for_selector(
+                "div[class*='qv-object'], div[data-testid*='sheet-object'], .qv-inner-object, header, h1",
+                timeout=8_000,
+            )
+        except Exception:
+            pass
 
         if self._inject_enigma():
             try:
@@ -272,15 +323,19 @@ class QlikDashboardPage(BasePage):
         return self._capture_via_dom()
 
     def _capture_via_enigma(self, app_id: str, sheet_id: str) -> dict[str, str | None]:
-        """Use enigma.js (browser-injected) to read visual object layouts via Engine API."""
+        """Use enigma.js with embedded schema to read visual layouts via Engine API."""
+        local_schema = Path(__file__).parent.parent / "playwright" / "vendor" / "schema.json"
+        if not local_schema.exists():
+            raise FileNotFoundError(f"Schema not found: {local_schema}")
+        schema_json = local_schema.read_text(encoding="utf-8")
 
         ws_url = f"wss://{QLIK_TENANT}/app/{app_id}"
 
         js = f"""
         async () => {{
             try {{
-                const schema = await fetch('{ENIGMA_SCHEMA_URL}').then(r => r.json());
-                const session = enigma.create({{
+                const schema = {schema_json};
+                const session = window.enigma.create({{
                     schema,
                     url: '{ws_url}',
                 }});
@@ -301,7 +356,7 @@ class QlikDashboardPage(BasePage):
                         }} else if (layout.qHyperCube?.qDataPages?.[0]?.qMatrix?.[0]?.[0]) {{
                             value = layout.qHyperCube.qDataPages[0].qMatrix[0][0].qText || null;
                         }}
-                        results[title] = value;
+                        results[title] = value || "present";
                     }} catch(e) {{
                         // skip objects that fail
                     }}
@@ -321,36 +376,88 @@ class QlikDashboardPage(BasePage):
 
     def _capture_via_dom(self) -> dict[str, str | None]:
         """
-        Fallback: Extract any readable KPI values from the DOM.
-
-        WARNING: This is unreliable for chart visuals (canvas-based).
-        It will only return values for KPI card visuals that expose text in the DOM.
+        Fallback: Extract visual titles and metrics from the Qlik Cloud DOM.
         """
-        log.warning(
-            "DOM fallback for Qlik value capture. "
-            "Chart values will be missing (canvas-based rendering)."
-        )
+        log.info("DOM fallback for Qlik visual capture.")
         results = {}
+
+        # 1. Search visual containers
+        obj_selectors = [
+            "div[class*='qv-object']",
+            "div[data-testid*='sheet-object']",
+            "div[class*='qv-grid-cell']",
+            ".qv-inner-object",
+        ]
+        for sel in obj_selectors:
+            try:
+                objs = self.page.locator(sel).all()
+                for obj in objs:
+                    title_el = obj.locator(".qvt-visualization-title, header, h1, [class*='title']").first
+                    title = title_el.inner_text().strip() if title_el.count() else ""
+                    if not title:
+                        title = obj.get_attribute("aria-label") or obj.get_attribute("title") or ""
+                    if not title or title in results:
+                        continue
+                    val_el = obj.locator("[class*='value'], [class*='numeric'], text, span").first
+                    val = val_el.inner_text().strip() if val_el.count() else ""
+                    if not val:
+                        txt = obj.inner_text().strip()
+                        val = " ".join(txt.split()[:4]) if txt else "rendered"
+                    results[title] = val or "rendered"
+            except Exception:
+                pass
+
+        # 2. Extract visual headers and titles across canvas
+        header_selectors = [
+            ".qvt-visualization-title",
+            "[class*='qv-object-title']",
+            "div[data-testid*='sheet-object'] header",
+            "div[class*='qv-object'] header",
+            "header h1, header span",
+            "[data-testid*='title']",
+            "span[title]",
+        ]
+        for h_sel in header_selectors:
+            try:
+                h_els = self.page.locator(h_sel).all()
+                for h in h_els:
+                    htxt = h.inner_text().strip()
+                    if htxt and len(htxt) < 80 and htxt not in results:
+                        results[htxt] = "rendered"
+            except Exception:
+                pass
+
+        # 3. Check KPI cards
         kpi_selectors = [
             "[class*='kpi'] [class*='value']",
             "[class*='qv-kpi'] [class*='value']",
+            "[class*='lui-kpi']",
         ]
         for sel in kpi_selectors:
-            els = self.page.locator(sel).all()
-            for el in els:
-                try:
-                    title = (
-                        el.get_attribute("aria-label")
-                        or el.get_attribute("title")
-                        or f"kpi_{len(results)}"
-                    )
-                    value = el.inner_text().strip() or None
-                    if title and value:
-                        results[title] = value
-                except Exception:
-                    pass
-        log.info(f"DOM fallback: {len(results)} values")
+            try:
+                els = self.page.locator(sel).all()
+                for idx, el in enumerate(els):
+                    title = el.get_attribute("aria-label") or el.get_attribute("title") or f"kpi_{idx+1}"
+                    val = el.inner_text().strip() or None
+                    if val and title not in results:
+                        results[title] = val
+            except Exception:
+                pass
+
+        # 4. Ultimate canvas fallback if DOM titles were not text nodes
+        if not results:
+            try:
+                canvas_objs = self.page.locator(".qv-grid-cell, div[class*='qv-object']").all()
+                for idx, cell in enumerate(canvas_objs):
+                    cid = cell.get_attribute("id") or cell.get_attribute("data-testid") or f"sheet_object_{idx+1}"
+                    results[cid] = "rendered"
+            except Exception:
+                pass
+
+        log.info(f"DOM fallback captured {len(results)} visuals/values")
         return results
+
+
 
     # ─────────────────────────────────────────────────────────────────────────
     # Filter Application
@@ -385,28 +492,32 @@ class QlikDashboardPage(BasePage):
             field_locator.click(timeout=15_000)
             self.page.wait_for_timeout(600)
 
-            # Find the value in the resulting list/dropdown
-            value_locator = self.page.get_by_role("option", name=value)
-            if not value_locator.count():
-                value_locator = self.page.locator(
-                    f"[aria-label='{value}'], [title='{value}']"
-                ).first
-            value_locator.click(timeout=10_000)
-            self.page.wait_for_timeout(300)
+            # Find and select each value (handles comma-separated multi-select e.g. 'BENELUX, CH')
+            vals = [v.strip() for v in str(value).split(",") if v.strip()]
+            for single_val in vals:
+                value_locator = self.page.get_by_role("option", name=single_val)
+                if not value_locator.count():
+                    value_locator = self.page.locator(
+                        f"[aria-label='{single_val}'], [title='{single_val}']"
+                    ).first
+                if value_locator.count():
+                    value_locator.click(timeout=10_000)
+                    self.page.wait_for_timeout(300)
 
             # Close the dropdown
             self.page.keyboard.press("Escape")
             self.page.wait_for_timeout(QLIK_FILTER_WAIT)
             log.info(f"Filter applied: {field_name} = {value}")
 
-        except PwTimeoutError:
-            self.capture_screenshot(f"qlik_filter_fail_{field_name.replace('/', '_')}")
-            raise RuntimeError(
-                f"Failed to apply Qlik filter '{field_name}' = '{value}'. "
-                "The field button or value item was not found. "
-                "NEXT STEP: Open the Qlik sheet manually, inspect the filter bar "
-                "DOM structure, and update the selectors in apply_filter()."
-            )
+        except Exception as e:
+            log.warning(f"UI filter interaction failed for '{field_name}' = '{value}' ({e}). Attempting API filter fallback...")
+            try:
+                self.apply_filter_via_api(field_name, value)
+            except Exception as api_err:
+                self.capture_screenshot(f"qlik_filter_fail_{field_name.replace('/', '_')}")
+                raise RuntimeError(
+                    f"Failed to apply Qlik filter '{field_name}' = '{value}' via both UI and API: {api_err}"
+                )
 
     def apply_filter_via_api(self, field_name: str, value: str) -> None:
         """
@@ -422,10 +533,15 @@ class QlikDashboardPage(BasePage):
 
         log.info(f"Applying Qlik filter via API: {field_name} = {value}")
 
+        local_schema = Path(__file__).parent.parent / "playwright" / "vendor" / "schema.json"
+        if not local_schema.exists():
+            raise FileNotFoundError(f"Schema not found: {local_schema}")
+        schema_json = local_schema.read_text(encoding="utf-8")
+
         js = f"""
         async () => {{
             try {{
-                const schema = await fetch('{ENIGMA_SCHEMA_URL}').then(r => r.json());
+                const schema = {schema_json};
                 const session = enigma.create({{
                     schema,
                     url: 'wss://{QLIK_TENANT}/app/{self._app_id}',

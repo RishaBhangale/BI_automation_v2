@@ -110,3 +110,44 @@ def compare_visual_impact(
         f"{len(extra)} extra in PBI (expected for migration). "
         f"Qlik: {sorted(changed_qlik)}. PBI: {sorted(changed_pbi)}."
     )
+
+
+def compare_single_value(
+    pbi_raw: Any,
+    source_value: Any,
+    tolerance: float = 0.01,
+    label: str = "",
+) -> tuple[bool, str]:
+    """
+    Compare an extracted Power BI value against a ground-truth number (from CSV or DB).
+
+    Tolerance: relative error (e.g. 0.01 = 1%).
+    """
+    prefix = f"[{label}] " if label else ""
+
+    pbi_num = parse_number(str(pbi_raw)) if not isinstance(pbi_raw, (int, float)) else float(pbi_raw)
+    try:
+        src_num = float(source_value) if source_value is not None else None
+    except (ValueError, TypeError):
+        src_num = None
+
+    if pbi_num is None:
+        return False, f"{prefix}FAIL — Could not parse PBI display value: {pbi_raw!r}"
+
+    if src_num is None:
+        return False, f"{prefix}FAIL — Source value is None or not a number: {source_value!r}"
+
+    if src_num == 0:
+        match = abs(pbi_num) <= 1e-4
+        diff_pct = 0.0 if match else 100.0
+    else:
+        diff_pct = abs(pbi_num - src_num) / abs(src_num) * 100.0
+        match = (diff_pct / 100.0) <= tolerance
+
+    status = "PASS" if match else "FAIL"
+    detail = (
+        f"{prefix}{status} — "
+        f"PBI: {pbi_num:,.2f} ({pbi_raw}) | Source: {src_num:,.2f} | "
+        f"Diff: {diff_pct:.2f}% (Tolerance: {tolerance * 100:.1f}%)"
+    )
+    return match, detail

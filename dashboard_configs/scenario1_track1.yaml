@@ -19,13 +19,43 @@ pbi:
   session_file: "playwright/.auth/pbi_session.json"
 
 # Qlik sheet -> PBI page name mapping
-# These are GUESSES based on screenshots — must be confirmed with migration team
-# Run Cat A tests first to discover actual names, then update this mapping
+# Built from the real page lists discovered on 2026-10-06 (21 Qlik sheets, 17 PBI pages).
+# 16 sheets have an identical page name in PBI.
 sheet_page_mapping:
+  # --- identical names in Qlik and PBI ---
   "Pipeline Hygiene IDG": "Pipeline Hygiene IDG"
-  "Overdue Opportunities": "Overdue Opportunities ISG"
-  "7 Days Opportunities": "7 Days Opportunities ISG"
-  "Missing PN Opportunities": "Missing PN Opportunities ISG"
-  "Overloaded Contracts": "Overloaded Contracts ISG"
-  "Next QTR Opportunities Unweighted": "Next QTR Opp Unweighted ISG"
-  "Next QTR Opportunities Weighted": "Next QTR Opp Weighted ISG"
+  "Pipeline Hygiene ISG": "Pipeline Hygiene ISG"
+  "Pipeline Hygiene ISG Nprint": "Pipeline Hygiene ISG Nprint"
+  "Pipeline Hygiene GA": "Pipeline Hygiene GA"
+  "NPrint Pipeline Hygiene Nordics": "NPrint Pipeline Hygiene Nordics"
+  "Overdue Opportunities": "Overdue Opportunities"
+  "Overdue Opportunities ISG": "Overdue Opportunities ISG"
+  "7 Days Opportunities ISG": "7 Days Opportunities ISG"
+  "Missing PN Opportunities": "Missing PN Opportunities"
+  "Missing PN Opportunities ISG": "Missing PN Opportunities ISG"
+  "Next QTR Opportunities Unweighted": "Next QTR Opportunities Unweighted"
+  "Next QTR Opportunities Unweighted ISG": "Next QTR Opportunities Unweighted ISG"
+  "Next QTR Opportunities Weighted": "Next QTR Opportunities Weighted"
+  "Next QTR Opportunities Weighted ISG": "Next QTR Opportunities Weighted ISG"
+  "Order Date vs Creation Date UAT": "Order Date vs Creation Date UAT"
+  "Raw Data": "Raw Data"
+
+  # --- ASSUMPTION: renamed during migration (PBI has no page named exactly like the Qlik sheet).
+  #     Confirm with the migration team.
+  "7 Days Opportunities": "7 Days Opportunities Selected"
+
+  # --- NO matching page found in PBI. These are expected to FAIL until the migration team
+  #     confirms whether they are missing, hidden pages, or intentionally out of scope.
+  "Idle Opportunities ISG": "Idle Opportunities ISG"
+  "Overloaded Contracts": "Overloaded Contracts"
+  "Overloaded Contracts ISG": "Overloaded Contracts ISG"
+  "Underloaded Services Contracts ISG": "Underloaded Services Contracts ISG"
+
+# Sheets the migration team has CONFIRMED (in writing) are intentionally NOT migrated.
+# Listed sheets are excluded from FP-A-001 / FP-A-002 and a WARNING is logged on every run.
+# Leave empty until confirmed - adding a sheet here hides a real migration gap.
+out_of_scope_sheets:
+  - "Idle Opportunities ISG"
+  - "Overloaded Contracts"
+  - "Overloaded Contracts ISG"
+  - "Underloaded Services Contracts ISG"

@@ -1,5 +1,9 @@
-# Auth sessions — contain cookies/tokens, NEVER commit
-playwright/.auth/*.json
+# Auth sessions & browser profiles — contain cookies, tokens, caches, NEVER commit
+playwright/.auth/*
+!playwright/.auth/.gitkeep
+
+# Office temporary files
+~$*
 
 # Secrets
 .env

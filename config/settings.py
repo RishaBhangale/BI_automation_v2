@@ -22,6 +22,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 # Timeouts (milliseconds)
 PBI_RENDER_TIMEOUT   = 90_000
 PBI_PAGE_SWITCH_WAIT = 5_000
+PBI_IFRAME_PROBE_TIMEOUT = 8_000    # how long to look for a report <iframe> before assuming none exists
+PBI_PAGELIST_TIMEOUT     = 30_000   # how long to keep polling for page tabs to render
 QLIK_RENDER_TIMEOUT  = 60_000
 QLIK_FILTER_WAIT     = 4_000
 DEFAULT_TIMEOUT      = 30_000
@@ -41,7 +43,10 @@ LOG_DIR        = str(PROJECT_ROOT / "logs")
 REPORT_DIR     = str(PROJECT_ROOT / "reports")
 AUTH_DIR       = str(PROJECT_ROOT / "playwright" / ".auth")
 
-# Session files (written by capture_*_session.py scripts)
+# Persistent Browser Profile (stores SSO sessions, IndexedDB, cookies across runs)
+BROWSER_PROFILE_DIR = str(PROJECT_ROOT / "playwright" / ".auth" / "browser_profile")
+
+# Legacy session snapshot files (fallback / seed)
 QLIK_SESSION_FILE = str(PROJECT_ROOT / "playwright" / ".auth" / "qlik_session.json")
 PBI_SESSION_FILE  = str(PROJECT_ROOT / "playwright" / ".auth" / "pbi_session.json")
 
