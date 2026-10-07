@@ -67,8 +67,11 @@ _PAGE_TAB_SELECTORS = [
     "[aria-label='Pages' i] button",
 ]
 
-# Names that are chrome/controls, never report pages.
-_NOT_PAGE_NAMES = {"pages", "page navigation", "previous page", "next page", "show pages", "hide pages"}
+# Names that are chrome/controls or other platform tabs, never PBI report pages.
+_NOT_PAGE_NAMES = {
+    "pages", "page navigation", "previous page", "next page", "show pages", "hide pages",
+    "sheets", "bookmarks", "stories",
+}
 
 _LOGIN_HOSTS = ("login.microsoftonline.com", "login.live.com", "login.windows.net")
 
@@ -85,6 +88,7 @@ class PBIDashboardPage(BasePage):
         super().__init__(page)
         self._frame: Optional[FrameLocator] = None
         self._frame_checked = False
+        self._report_url: str = ""
 
     # ─────────────────────────────────────────────────────────────────────────
     # Open & Frame
@@ -102,6 +106,7 @@ class PBIDashboardPage(BasePage):
                 pass
 
         log.info(f"Opening PBI report: {report_url}")
+        self._report_url = report_url
         self._frame = None
         self._frame_checked = False          # new navigation -> re-detect iframe
         self.page.goto(report_url, timeout=PBI_RENDER_TIMEOUT)
@@ -210,6 +215,13 @@ class PBIDashboardPage(BasePage):
         selector can be corrected from real markup.
         """
         log.info("Getting PBI page list")
+        if "powerbi.com" not in self.page.url.lower() and self._report_url:
+            log.warning(
+                f"PBIDashboardPage.get_page_list() invoked while on non-PBI URL ({self.page.url}). "
+                f"Re-navigating to {self._report_url}..."
+            )
+            self.open(self._report_url)
+
         ctx = self._ctx()
         deadline = time.monotonic() + PBI_PAGELIST_TIMEOUT / 1000
         tried_pane = False

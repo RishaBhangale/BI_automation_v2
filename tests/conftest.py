@@ -165,12 +165,19 @@ def warm_pbi_page(request, persistent_browser_context, config) -> Page:
     if not report_url:
         pytest.skip("No PBI report URL configured")
 
-    # Use first available page or create one
-    if persistent_browser_context.pages:
-        page = persistent_browser_context.pages[0]
-    else:
+    # Find dedicated PBI page or allocate an unclaimed/new tab
+    page = None
+    for p in persistent_browser_context.pages:
+        if getattr(p, "_platform", None) == "pbi":
+            page = p
+            break
+        elif getattr(p, "_platform", None) is None and page is None:
+            page = p
+
+    if page is None:
         page = persistent_browser_context.new_page()
 
+    page._platform = "pbi"
     dashboard = PBIDashboardPage(page)
     dashboard.open(report_url)
     return page
@@ -190,17 +197,19 @@ def warm_qlik_page(request, persistent_browser_context, config) -> Page:
     if not app_id or not sheet_id:
         pytest.skip("No Qlik app_id or primary_sheet_id configured")
 
-    # Open a new tab for Qlik if the first page is already showing PBI
-    if (
-        persistent_browser_context.pages
-        and "powerbi.com" in persistent_browser_context.pages[0].url
-    ):
-        page = persistent_browser_context.new_page()
-    elif persistent_browser_context.pages:
-        page = persistent_browser_context.pages[0]
-    else:
+    # Find dedicated Qlik page or allocate an unclaimed/new tab
+    page = None
+    for p in persistent_browser_context.pages:
+        if getattr(p, "_platform", None) == "qlik":
+            page = p
+            break
+        elif getattr(p, "_platform", None) is None and page is None:
+            page = p
+
+    if page is None:
         page = persistent_browser_context.new_page()
 
+    page._platform = "qlik"
     dashboard = QlikDashboardPage(page)
     dashboard.open(app_id, sheet_id)
     return page
