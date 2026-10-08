@@ -144,18 +144,51 @@ class QlikDashboardPage(BasePage):
     def navigate_to_sheet(self, sheet_title: str) -> None:
         """
         Navigate to a sheet by its display title.
-        Resolves the sheet title to its discovered GUID and opens it directly.
+        Resolves the sheet title to its discovered GUID and opens it directly,
+        or clicks the sheet card if on App Overview (Images 4, 5).
 
         Args:
-            sheet_title: Display name of the sheet (e.g., 'Pipeline Hygiene IDG')
+            sheet_title: Display name of the sheet (e.g., 'Pipeline Hygiene IDG', 'Overdue Opportunities')
         """
         log.info(f"Navigating to Qlik sheet: '{sheet_title}'")
+        s_clean = sheet_title.lower().strip()
+
+        # Known verified sheet GUIDs for Pipeline Hygiene Main (Image 5)
+        known_sheet_map = {
+            "pipeline hygiene idg": "ec6922ca-7f1b-4766-9066-38074d8849ca",
+            "overdue opportunities": "yEEHkV",
+        }
+        if s_clean in known_sheet_map and self._app_id:
+            target_sid = known_sheet_map[s_clean]
+            log.info(f"Resolved sheet '{sheet_title}' via known map -> ID: {target_sid}")
+            self.open(self._app_id, target_sid)
+            return
+
+        # If on Overview page, click the sheet card directly (Image 4)
+        if "overview" in self.page.url.lower():
+            card_selectors = [
+                f"[data-testid*='sheet']:has-text('{sheet_title}')",
+                f".qv-object-sheet:has-text('{sheet_title}')",
+                f"[title='{sheet_title}']",
+                f"div.qv-object-sheet div:has-text('{sheet_title}')",
+            ]
+            for c_sel in card_selectors:
+                try:
+                    card = self.page.locator(c_sel).first
+                    if card.count() > 0 and card.is_visible(timeout=500):
+                        card.click(timeout=3_000)
+                        self._wait_for_sheet_load()
+                        log.info(f"Navigated to '{sheet_title}' by clicking card on Overview")
+                        return
+                except Exception:
+                    pass
+
         if not self._discovered_sheets:
             self.get_sheet_list_via_api()
 
         target_sid = None
         for sid, title in self._discovered_sheets.items():
-            if title.lower().strip() == sheet_title.lower().strip():
+            if title.lower().strip() == s_clean:
                 target_sid = sid
                 break
 
@@ -463,18 +496,194 @@ class QlikDashboardPage(BasePage):
     # Filter Application
     # ─────────────────────────────────────────────────────────────────────────
 
+    def filter_via_table_column(self, field_name: str, value: str) -> bool:
+        """
+        Apply a filter by clicking the search icon (🔍) on a table column header,
+        as shown in Qlik Sense UI (Image 2).
+        
+        Steps:
+          1. Find table column header matching field_name or aliases ('Market', 'GEO', etc.)
+          2. Click the magnifying glass button (🔍) inside the column header.
+          3. Fill search input ('Search in listbox') with target value(s).
+          4. Click matching list item row.
+          5. Click the green confirm checkmark (✓).
+        """
+        clean = field_name.lower().strip()
+        alias_map = {
+            "geo level 3": ["Market", "GEO Level3", "GEO Level 3", "GEO", "Country[GEO Level3]"],
+            "geo level3": ["Market", "GEO Level3", "GEO Level 3", "GEO", "Country[GEO Level3]"],
+            "market": ["Market", "GEO Level3", "GEO Level 3", "GEO"],
+            "geo level 1": ["GEO", "GEO Level1", "GEO Level 1"],
+            "geo level1": ["GEO", "GEO Level1", "GEO Level 1"],
+            "geo": ["GEO", "GEO Level1", "Market"],
+        }
+        candidates = list(alias_map.get(clean, [field_name]))
+        if field_name not in candidates:
+            candidates.insert(0, field_name)
+
+        log.info(f"Attempting Qlik table column filter for '{field_name}' = '{value}' (candidates: {candidates})")
+
+        for cand in candidates:
+            try:
+                # Find column header containing the field title
+                header_selectors = [
+                    f"th:has-text('{cand}')",
+                    f"[role='columnheader']:has-text('{cand}')",
+                    f".sn-table-cell-header:has-text('{cand}')",
+                    f"[data-cell-type='header']:has-text('{cand}')",
+                    f".qv-st-header-cell:has-text('{cand}')",
+                    f".sn-table-header-cell:has-text('{cand}')",
+                ]
+                col_header = None
+                for h_sel in header_selectors:
+                    h_loc = self.page.locator(h_sel).first
+                    if h_loc.count() > 0 and h_loc.is_visible(timeout=500):
+                        col_header = h_loc
+                        break
+
+                if not col_header:
+                    continue
+
+                log.info(f"Found Qlik table column header for '{cand}'")
+                try:
+                    col_header.hover(timeout=1_000)
+                    self.page.wait_for_timeout(200)
+                except Exception:
+                    pass
+
+                # Search button with magnifying glass icon inside the header (Image 2)
+                search_btn_selectors = [
+                    "button:has(.lui-icon--search)",
+                    "button[title*='Search' i]",
+                    "button[aria-label*='Search' i]",
+                    ".lui-icon--search",
+                    "button[data-testid*='search']",
+                    "button.lui-button:has(.lui-icon--search)",
+                ]
+                search_clicked = False
+                for s_sel in search_btn_selectors:
+                    s_btn = col_header.locator(s_sel).first
+                    if s_btn.count() > 0 and s_btn.is_visible(timeout=500):
+                        s_btn.click(timeout=2_000, force=True)
+                        search_clicked = True
+                        log.info(f"Clicked search icon (🔍) on column header '{cand}'")
+                        break
+
+                if not search_clicked:
+                    col_header.click(timeout=1_500, force=True)
+                    search_clicked = True
+
+                self.page.wait_for_timeout(500)
+
+                # Wait for the listbox popover
+                popover_selectors = [
+                    ".qv-listbox",
+                    ".lui-popover",
+                    "div:has(input[placeholder*='Search in listbox'])",
+                    "[data-testid*='listbox']",
+                    ".qv-object-listbox",
+                ]
+                popover = None
+                for p_sel in popover_selectors:
+                    p_loc = self.page.locator(p_sel).first
+                    if p_loc.count() > 0 and p_loc.is_visible(timeout=1_000):
+                        popover = p_loc
+                        break
+
+                if not popover:
+                    log.debug(f"Popover did not appear after clicking header for '{cand}'")
+                    continue
+
+                # Search box inside popover
+                search_input = popover.locator(
+                    "input[placeholder*='Search in listbox' i], input.lui-search__input, input[type='text'], input[placeholder*='Search' i]"
+                ).first
+
+                vals = [v.strip() for v in str(value).split(",") if v.strip()]
+                any_selected = False
+
+                for single_val in vals:
+                    if search_input.count() > 0 and search_input.is_visible(timeout=500):
+                        try:
+                            search_input.click(timeout=1_000)
+                            search_input.fill("")
+                            search_input.fill(single_val)
+                            self.page.wait_for_timeout(400)
+                        except Exception:
+                            pass
+
+                    item_selectors = [
+                        f"[role='option']:has-text('{single_val}')",
+                        f".lui-list__item:has-text('{single_val}')",
+                        f".qv-listbox [title='{single_val}']",
+                        f"[title='{single_val}']",
+                        f"span:text-is('{single_val}')",
+                        f"div:text-is('{single_val}')",
+                    ]
+                    item_clicked = False
+                    for i_sel in item_selectors:
+                        i_loc = popover.locator(i_sel).first
+                        if i_loc.count() > 0 and i_loc.is_visible(timeout=1_000):
+                            i_loc.click(timeout=2_000, force=True)
+                            self.page.wait_for_timeout(300)
+                            item_clicked = True
+                            any_selected = True
+                            log.info(f"Selected listbox item '{single_val}'")
+                            break
+
+                    if not item_clicked:
+                        log.warning(f"Could not find listbox item '{single_val}' in popover")
+
+                if any_selected:
+                    # Click green confirm checkmark (✓)
+                    confirm_selectors = [
+                        "button[title*='Confirm' i]",
+                        "button[aria-label*='Confirm' i]",
+                        "button:has(.lui-icon--tick)",
+                        ".lui-icon--tick",
+                        "button.lui-button--success",
+                        "[data-testid*='confirm']",
+                    ]
+                    confirmed = False
+                    for c_sel in confirm_selectors:
+                        c_btn = self.page.locator(c_sel).first
+                        if c_btn.count() > 0 and c_btn.is_visible(timeout=600):
+                            c_btn.click(timeout=1_500, force=True)
+                            confirmed = True
+                            log.info("Clicked confirm checkmark (✓) for Qlik column filter")
+                            break
+
+                    if not confirmed:
+                        self.page.keyboard.press("Enter")
+                        self.page.wait_for_timeout(300)
+                        self.page.keyboard.press("Escape")
+
+                    self.page.wait_for_timeout(QLIK_FILTER_WAIT)
+                    log.info(f"Successfully applied Qlik table column filter: '{cand}' = '{value}'")
+                    return True
+
+            except Exception as e:
+                log.debug(f"Table column filter attempt failed for '{cand}': {e}")
+                continue
+
+        return False
+
     def apply_filter(self, field_name: str, value: str) -> None:
         """
         Apply a filter selection in Qlik via UI interaction.
 
-        This clicks on the filter bar / sheet listbox, selects the field, and picks the value.
-        Used for Category D tests where we want to test the actual UI interaction.
+        Tries table column search (Image 2) first, then falls back to filterpane / Selections Tool.
 
         Args:
-            field_name: Qlik dimension name (e.g., 'Geo', 'Calendar[Date]', 'GEO Level 3')
+            field_name: Qlik dimension name (e.g., 'Geo', 'Market', 'GEO Level 3')
             value:      Value to select (e.g., '2026-08', 'BENELUX, CH')
         """
         log.info(f"Applying Qlik filter: {field_name} = {value}")
+
+        # 1. Try table column filter (Image 2 end-user workflow)
+        if self.filter_via_table_column(field_name, value):
+            log.info(f"Qlik filter applied via table column: {field_name} = {value}")
+            return
 
         clean = field_name.lower().strip()
         alias_map = {

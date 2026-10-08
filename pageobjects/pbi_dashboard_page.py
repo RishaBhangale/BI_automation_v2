@@ -667,23 +667,53 @@ class PBIDashboardPage(BasePage):
                         log.debug(f"Matched fallback data visual with selector: {d_sel}")
                         break
 
+            # Fallback: pick the first visible canvas visual container (excluding toggle button slicers)
+            if not candidate_vis:
+                all_vcs = ctx.locator("visual-container, [data-automation-type='visualContainer']").all()
+                for vc in all_vcs:
+                    try:
+                        if vc.locator(".buttonSlicerVisual, [class*='buttonSlicer']").count() > 0:
+                            continue
+                        if vc.is_visible(timeout=400):
+                            candidate_vis = vc
+                            log.debug("Matched first visible non-toggle canvas visual container")
+                            break
+                    except Exception:
+                        continue
+
             if not candidate_vis:
                 log.warning(f"Could not locate visual '{visual_target}' on canvas to select")
                 return False
 
             candidate_vis.scroll_into_view_if_needed()
-            # Safely click visual header / title or top-left margin to prevent cross-filtering data points
             clicked = False
-            header = candidate_vis.locator(
-                "[class*='visualTitle'], [class*='header-title'], h3, .visualHeader, .visualHeaderWrapper, .header-text"
-            ).first
-            if header.count() > 0 and header.is_visible(timeout=800):
-                try:
-                    header.click(timeout=1_500, force=True)
-                    clicked = True
-                except Exception as ex_h:
-                    log.debug(f"Header click with force failed: {ex_h}")
 
+            # 1. Right-click activation: as shown in Image 1, right-clicking the visual
+            # populates and focuses 'Filters on this visual' in the Filters Pane.
+            try:
+                candidate_vis.click(button="right", timeout=2_000, force=True)
+                clicked = True
+                self.page.wait_for_timeout(400)
+                # Press Escape to dismiss the context menu ('Copy', 'Share', etc.) without losing visual selection
+                self.page.keyboard.press("Escape")
+                self.page.wait_for_timeout(200)
+                log.info(f"Visual '{visual_target or '<primary data visual>'}' right-clicked to activate visual filters")
+            except Exception as ex_r:
+                log.debug(f"Right-click on visual container failed: {ex_r}")
+
+            # 2. Header click fallback
+            if not clicked:
+                header = candidate_vis.locator(
+                    "[class*='visualTitle'], [class*='header-title'], h3, .visualHeader, .visualHeaderWrapper, .header-text"
+                ).first
+                if header.count() > 0 and header.is_visible(timeout=800):
+                    try:
+                        header.click(timeout=1_500, force=True)
+                        clicked = True
+                    except Exception as ex_h:
+                        log.debug(f"Header click with force failed: {ex_h}")
+
+            # 3. Margin click fallback
             if not clicked:
                 try:
                     candidate_vis.click(position={"x": 15, "y": 15}, timeout=1_500, force=True)
@@ -691,6 +721,7 @@ class PBIDashboardPage(BasePage):
                 except Exception as ex_c:
                     log.debug(f"Container margin click with force failed: {ex_c}")
 
+            # 4. Dispatch event fallback
             if not clicked:
                 try:
                     candidate_vis.dispatch_event("click")

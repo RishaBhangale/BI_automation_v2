@@ -40,9 +40,7 @@ sheet_page_mapping:
   "Order Date vs Creation Date UAT": "Order Date vs Creation Date UAT"
   "Raw Data": "Raw Data"
 
-  # --- ASSUMPTION: renamed during migration (PBI has no page named exactly like the Qlik sheet).
-  #     Confirm with the migration team.
-  "7 Days Opportunities": "7 Days Opportunities Selected"
+  "7 Days Opportunities": "7 Days Opportunities"
 
   # --- NO matching page found in PBI. These are expected to FAIL until the migration team
   #     confirms whether they are missing, hidden pages, or intentionally out of scope.
