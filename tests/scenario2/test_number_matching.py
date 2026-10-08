@@ -84,15 +84,47 @@ def test_pbi_visual_matches_csv_source(tc, pbi_dashboard, csv_engine, config):
     seven_days_flag = None
     missing_pn_flag = None
 
-    if add_filters:
+    if add_filters and str(add_filters).lower() != "nan":
         add_str = str(add_filters)
         if "Past Due=-1" in add_str or "Past Due" in add_str:
             past_due_flag = True
             csv_filters["Past Due"] = -1
         if "Days To Close<=7" in add_str or "7 Days" in add_str or "7 Day" in add_str:
             seven_days_flag = True
+            csv_filters["Days To Close"] = "<= 7"
         if "Missing PN" in add_str:
             missing_pn_flag = True
+
+        # Extract explicit key-value pairs (e.g. Business Group=IDG; Open Pipe Flag=Past Open)
+        for part in add_str.split(";"):
+            part = part.strip()
+            if "=" in part:
+                if any(op in part for op in ("<=", ">=", "!=", "<", ">")):
+                    continue
+                k, v = part.split("=", 1)
+                k_clean = k.strip()
+                v_clean = v.strip()
+                if k_clean not in ("Past Due", "Days To Close", "Missing PN"):
+                    if v_clean.lower() in ("*", "all", "none", "any"):
+                        csv_filters[k_clean] = None
+                    else:
+                        csv_filters[k_clean] = v_clean
+
+    # Track 2 Pipeline Hygiene is IDG-scoped: if 'isg' not in (pbi_page_name or '').lower(), set Business Group = 'IDG'
+    # Respect explicit Business Group if already specified in Additional Filters
+    if "Business Group" not in csv_filters:
+        if "isg" not in (pbi_page_name or "").lower():
+            csv_filters["Business Group"] = "IDG"
+
+    # Set csv_filters['Open Pipe Flag']:
+    # - 'Past Open' when past_due_flag is True or 'overdue' in (pbi_page_name or '').lower()
+    # - 'To Go' when '7 days' in (pbi_page_name or '').lower() or 'missing pn' in (pbi_page_name or '').lower()
+    # Respect explicit Open Pipe Flag if already specified in Additional Filters
+    if "Open Pipe Flag" not in csv_filters:
+        if past_due_flag is True or "overdue" in (pbi_page_name or "").lower():
+            csv_filters["Open Pipe Flag"] = "Past Open"
+        elif "7 days" in (pbi_page_name or "").lower() or "missing pn" in (pbi_page_name or "").lower():
+            csv_filters["Open Pipe Flag"] = "To Go"
 
     # Parse Calendar Filter
     if cal_filter and "=" in str(cal_filter):
@@ -108,12 +140,13 @@ def test_pbi_visual_matches_csv_source(tc, pbi_dashboard, csv_engine, config):
         geo_category_values = regions
 
     # 2. Compute expected scalar ground truth from CSV datasets immediately
-    log.info(f"Computing CSV ground truth with filters: {csv_filters}")
+    clean_csv_filters = {k: v for k, v in csv_filters.items() if v is not None}
+    log.info(f"Computing CSV ground truth with filters: {clean_csv_filters}")
     expected_value = csv_engine.get_aggregated_sum(
         measure=measure_name,
-        filters=csv_filters,
+        filters=clean_csv_filters,
         past_due=past_due_flag,
-        seven_days_only=seven_days_flag,
+        seven_days_only=None if "Days To Close" in clean_csv_filters else seven_days_flag,
         missing_pn_only=missing_pn_flag,
     )
     log.info(f"CSV Ground Truth Expected: {expected_value:,.2f}")
@@ -132,15 +165,13 @@ def test_pbi_visual_matches_csv_source(tc, pbi_dashboard, csv_engine, config):
     # 5. Set metric toggle (Quantity vs Revenue)
     if measure_name:
         pbi_dashboard.set_metric_toggle(measure_name)
-        if test_id == "NM-001":
-            pbi_dashboard.dump_diagnostics("diag_NM-001_revenue")
 
     # 6. Apply slicers on PBI defensively
     if cal_filter and "=" in str(cal_filter):
         k, v = str(cal_filter).split("=", 1)
         log.info(f"Applying slicer: {k.strip()} = {v.strip()}")
         try:
-            pbi_dashboard.apply_slicer(k.strip(), v.strip())
+            pbi_dashboard.apply_slicer(k.strip(), v.strip(), target_visual=visual_target)
         except Exception as e:
             log.warning(f"Could not apply PBI slicer {k.strip()} = {v.strip()}: {e}")
 
@@ -148,7 +179,7 @@ def test_pbi_visual_matches_csv_source(tc, pbi_dashboard, csv_engine, config):
         k, v = str(geo_filter).split("=", 1)
         log.info(f"Applying slicer: {k.strip()} = {v.strip()}")
         try:
-            pbi_dashboard.apply_slicer(k.strip(), v.strip())
+            pbi_dashboard.apply_slicer(k.strip(), v.strip(), target_visual=visual_target)
         except Exception as e:
             log.warning(f"Could not apply PBI slicer {k.strip()} = {v.strip()}: {e}")
 

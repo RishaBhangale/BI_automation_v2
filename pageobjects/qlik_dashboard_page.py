@@ -467,57 +467,182 @@ class QlikDashboardPage(BasePage):
         """
         Apply a filter selection in Qlik via UI interaction.
 
-        This clicks on the filter bar, selects the field, and picks the value.
+        This clicks on the filter bar / sheet listbox, selects the field, and picks the value.
         Used for Category D tests where we want to test the actual UI interaction.
 
-        IMPORTANT: Qlik's filter UI varies between versions. If this fails,
-        inspect the actual Qlik DOM and update the selectors below.
-        The selectors here are best-effort based on known Qlik Cloud DOM patterns.
-
         Args:
-            field_name: Qlik dimension name (e.g., 'Geo', 'IDG/ISG', 'Market')
-            value:      Value to select (e.g., 'META', 'IDG', 'KEY ACCOUNT')
+            field_name: Qlik dimension name (e.g., 'Geo', 'Calendar[Date]', 'GEO Level 3')
+            value:      Value to select (e.g., '2026-08', 'BENELUX, CH')
         """
         log.info(f"Applying Qlik filter: {field_name} = {value}")
 
+        clean = field_name.lower().strip()
+        alias_map = {
+            "calendar[date]": ["Calendar YearMonth", "Calendar[Date]", "Date", "YearMonth", "Calendar Date"],
+            "date": ["Calendar YearMonth", "Date", "Calendar[Date]", "YearMonth"],
+            "calendar yearmonth": ["Calendar YearMonth", "Calendar[Date]", "YearMonth", "Date"],
+            "calendar[yearmonth]": ["Calendar YearMonth", "Calendar[YearMonth]", "YearMonth", "Date"],
+            "geo level 3": ["GEO Level3", "GEO Level 3", "Market", "Country[GEO Level3]", "Geo"],
+            "geo level3": ["GEO Level3", "GEO Level 3", "Market", "Country[GEO Level3]", "Geo"],
+            "market": ["Market", "GEO Level3", "GEO Level 3", "Geo"],
+        }
+        candidates = list(alias_map.get(clean, [field_name]))
+        if field_name not in candidates:
+            candidates.insert(0, field_name)
+
         try:
-            # Attempt 1: Find the field button in the filter pane/toolbar
-            field_locator = (
-                self.page.get_by_role("button", name=field_name)
-                or self.page.locator(
-                    f"[aria-label='{field_name}'], "
-                    f"[title='{field_name}']"
-                ).first
-            )
-            field_locator.click(timeout=15_000)
-            self.page.wait_for_timeout(600)
+            field_clicked = False
+            for cand in candidates:
+                selectors = [
+                    f".qv-filterpane-header:has-text('{cand}')",
+                    f".qv-filterpane-item:has-text('{cand}')",
+                    f".qv-collapsed-listbox:has-text('{cand}')",
+                    f".qv-object-filterpane [title*='{cand}' i]",
+                    f".qv-object-filterpane [aria-label*='{cand}' i]",
+                    f".qv-subtoolbar-button:has-text('{cand}')",
+                    f"[data-testid*='filter']:has-text('{cand}')",
+                    f"[data-testid*='selections'] [title*='{cand}' i]",
+                    f"button[title*='{cand}' i]",
+                    f"button[aria-label*='{cand}' i]",
+                    f"button:has-text('{cand}')",
+                    f"[role='button']:has-text('{cand}')",
+                ]
+                for sel in selectors:
+                    try:
+                        loc = self.page.locator(sel).first
+                        if loc.count() > 0 and loc.is_visible(timeout=500):
+                            loc.click(timeout=3_000)
+                            self.page.wait_for_timeout(600)
+                            field_clicked = True
+                            log.info(f"Clicked Qlik filter field '{cand}' with selector: {sel}")
+                            break
+                    except Exception:
+                        continue
+                if field_clicked:
+                    break
 
-            # Find and select each value (handles comma-separated multi-select e.g. 'BENELUX, CH')
-            vals = [v.strip() for v in str(value).split(",") if v.strip()]
-            for single_val in vals:
-                value_locator = self.page.get_by_role("option", name=single_val)
-                if not value_locator.count():
-                    value_locator = self.page.locator(
-                        f"[aria-label='{single_val}'], [title='{single_val}']"
+            # Fallback to Selections Tool if field header wasn't on canvas
+            if not field_clicked:
+                try:
+                    sel_tool_btn = self.page.locator(
+                        "button[title*='Selections' i], button[aria-label*='Selections' i], [data-testid*='selections-tool'], .lui-icon--selections-tool"
                     ).first
-                if value_locator.count():
-                    value_locator.click(timeout=10_000)
-                    self.page.wait_for_timeout(300)
+                    if sel_tool_btn.count() > 0 and sel_tool_btn.is_visible(timeout=1_000):
+                        sel_tool_btn.click(timeout=2_000)
+                        self.page.wait_for_timeout(800)
 
-            # Close the dropdown
-            self.page.keyboard.press("Escape")
-            self.page.wait_for_timeout(QLIK_FILTER_WAIT)
-            log.info(f"Filter applied: {field_name} = {value}")
+                        # Try directly visible candidates first
+                        for cand in candidates:
+                            f_loc = self.page.locator(
+                                f".qv-selections-toolbar-field:has-text('{cand}'), "
+                                f"[data-testid*='selections-field']:has-text('{cand}'), "
+                                f"button[title*='{cand}' i], button:has-text('{cand}'), "
+                                f"[role='button']:has-text('{cand}'), [aria-label*='{cand}' i]"
+                            ).first
+                            if f_loc.count() > 0 and f_loc.is_visible(timeout=500):
+                                f_loc.click(timeout=2_000)
+                                self.page.wait_for_timeout(600)
+                                field_clicked = True
+                                log.info(f"Opened Qlik field '{cand}' in Selections Tool")
+                                break
+
+                        # If not visible directly, search inside Selections Tool
+                        if not field_clicked:
+                            sel_search = self.page.locator(
+                                ".qv-selections-toolbar-search input, .lui-search__input, input.lui-search__field, input[placeholder*='Search' i]"
+                            ).first
+                            if sel_search.count() > 0 and sel_search.is_visible(timeout=1_000):
+                                for cand in candidates:
+                                    try:
+                                        sel_search.fill("")
+                                        sel_search.fill(cand)
+                                        self.page.wait_for_timeout(600)
+                                        f_loc = self.page.locator(
+                                            f".qv-selections-toolbar-field:has-text('{cand}'), "
+                                            f"[data-testid*='selections-field']:has-text('{cand}'), "
+                                            f"button[title*='{cand}' i], button:has-text('{cand}'), "
+                                            f"[role='button']:has-text('{cand}'), [title*='{cand}' i]"
+                                        ).first
+                                        if f_loc.count() > 0 and f_loc.is_visible(timeout=1_500):
+                                            f_loc.click(timeout=2_000)
+                                            self.page.wait_for_timeout(600)
+                                            field_clicked = True
+                                            log.info(f"Opened Qlik field '{cand}' in Selections Tool via search")
+                                            break
+                                    except Exception:
+                                        continue
+                except Exception:
+                    pass
+
+            if field_clicked:
+                # Find and select each value (handles comma-separated multi-select e.g. 'BENELUX, CH')
+                vals = [v.strip() for v in str(value).split(",") if v.strip()]
+                any_val_clicked = False
+                for single_val in vals:
+                    search_box = self.page.locator(".qv-listbox input, input[placeholder*='Search' i], .lui-search__input").first
+                    if search_box.count() > 0 and search_box.is_visible(timeout=500):
+                        try:
+                            search_box.fill("")
+                            search_box.fill(single_val)
+                            self.page.wait_for_timeout(300)
+                        except Exception:
+                            pass
+
+                    val_selectors = [
+                        f"[role='option']:has-text('{single_val}')",
+                        f".qv-listbox [title='{single_val}']",
+                        f"[title='{single_val}']",
+                        f"[aria-label='{single_val}']",
+                        f"span:text-is('{single_val}')",
+                        f":text-is('{single_val}')",
+                    ]
+                    val_clicked = False
+                    for v_sel in val_selectors:
+                        try:
+                            v_loc = self.page.locator(v_sel).first
+                            if v_loc.count() > 0 and v_loc.is_visible(timeout=1_000):
+                                v_loc.click(timeout=2_000)
+                                self.page.wait_for_timeout(300)
+                                val_clicked = True
+                                any_val_clicked = True
+                                break
+                        except Exception:
+                            continue
+                    if not val_clicked:
+                        log.warning(f"Could not click Qlik value '{single_val}'")
+
+                if not any_val_clicked:
+                    self.page.keyboard.press("Escape")
+                    self.page.wait_for_timeout(300)
+                    raise RuntimeError(f"Could not click any Qlik filter values {vals} for field '{field_name}' in UI")
+
+                # Confirm selection
+                confirm_btn = self.page.locator("button[title*='Confirm' i], button[aria-label*='Confirm' i], .lui-icon--tick, [data-testid*='confirm']").first
+                if confirm_btn.count() > 0 and confirm_btn.is_visible(timeout=500):
+                    confirm_btn.click(timeout=1_500)
+                else:
+                    self.page.keyboard.press("Enter")
+                self.page.wait_for_timeout(300)
+                self.page.keyboard.press("Escape")
+                self.page.wait_for_timeout(QLIK_FILTER_WAIT)
+                log.info(f"Qlik UI filter applied: {field_name} = {value}")
+                return
+
+            raise RuntimeError(f"Could not locate Qlik filter field '{field_name}' in UI (tried: {candidates})")
 
         except Exception as e:
             log.warning(f"UI filter interaction failed for '{field_name}' = '{value}' ({e}). Attempting API filter fallback...")
-            try:
-                self.apply_filter_via_api(field_name, value)
-            except Exception as api_err:
-                self.capture_screenshot(f"qlik_filter_fail_{field_name.replace('/', '_')}")
-                raise RuntimeError(
-                    f"Failed to apply Qlik filter '{field_name}' = '{value}' via both UI and API: {api_err}"
-                )
+            api_errors = []
+            for cand in candidates:
+                try:
+                    self.apply_filter_via_api(cand, value)
+                    return
+                except Exception as api_err:
+                    api_errors.append(f"{cand}: {api_err}")
+            self.capture_screenshot(f"qlik_filter_fail_{clean.replace('/', '_').replace('[', '_').replace(']', '_')}")
+            raise RuntimeError(
+                f"Failed to apply Qlik filter '{field_name}' = '{value}' via both UI and API (tried: {candidates}): {'; '.join(api_errors)}"
+            )
 
     def apply_filter_via_api(self, field_name: str, value: str) -> None:
         """
@@ -527,9 +652,7 @@ class QlikDashboardPage(BasePage):
         Faster and more reliable than apply_filter() for non-UI tests.
         """
         if not self._inject_enigma():
-            log.warning("enigma.js not available — falling back to UI filter")
-            self.apply_filter(field_name, value)
-            return
+            raise RuntimeError("enigma.js not available for Qlik API filter")
 
         log.info(f"Applying Qlik filter via API: {field_name} = {value}")
 
@@ -538,22 +661,28 @@ class QlikDashboardPage(BasePage):
             raise FileNotFoundError(f"Schema not found: {local_schema}")
         schema_json = local_schema.read_text(encoding="utf-8")
 
+        vals = [v.strip() for v in str(value).split(",") if v.strip()]
+        select_values_json = json.dumps([{"qText": v} for v in vals])
+        field_name_json = json.dumps(field_name)
+
         js = f"""
         async () => {{
             try {{
                 const schema = {schema_json};
-                const session = enigma.create({{
+                const en = window.enigma || enigma;
+                const session = en.create({{
                     schema,
                     url: 'wss://{QLIK_TENANT}/app/{self._app_id}',
                 }});
                 const global = await session.open();
                 const app = await global.openDoc('{self._app_id}');
-                const field = await app.getField('{field_name}');
-                await field.selectValues([{{ qText: '{value}' }}], true, false);
+                const field = await app.getField({field_name_json});
+                await field.selectValues({select_values_json}, true, false);
                 await session.close();
                 return {{ success: true }};
             }} catch(err) {{
-                return {{ success: false, error: err.toString() }};
+                const msg = err && err.message ? err.message : (err && err.target ? 'WebSocket connection rejected/closed' : String(err));
+                return {{ success: false, error: msg }};
             }}
         }}
         """

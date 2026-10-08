@@ -48,7 +48,16 @@ def detect_changed_visuals(
     """
     Return the set of visual titles whose values changed between two snapshots.
     A visual is "changed" if its value differs or if it appeared/disappeared.
+    If either baseline or current snapshot is empty (e.g. failed capture),
+    returns an empty set to prevent false-positive change detection.
     """
+    if not baseline or not current:
+        log.warning(
+            f"detect_changed_visuals: Cannot compare when snapshot is empty "
+            f"(baseline={len(baseline)}, current={len(current)})"
+        )
+        return set()
+
     changed = set()
     all_keys = set(baseline.keys()) | set(current.keys())
     for key in all_keys:
@@ -70,9 +79,9 @@ def compare_visual_impact(
 
     Pass conditions:
     1. At least one visual changed on BOTH platforms.
-    2. Every visual that changed on Qlik also changed on PBI.
+    2. Every visual that changed on Qlik also has a corresponding change on PBI.
        (PBI is allowed MORE changes — migration may add extra visuals.)
-       (PBI is NOT allowed FEWER changes — that is a broken propagation.)
+       (PBI is NOT allowed FEWER/missing changes — that is a broken propagation.)
 
     Returns: (passed: bool, detail: str)
     """
@@ -80,35 +89,54 @@ def compare_visual_impact(
 
     if not changed_qlik:
         return False, (
-            f"{prefix}FAIL — Filter had NO effect on Qlik. "
+            f"{prefix}FAIL — Filter had NO effect on Qlik. Visuals did not react. "
             "Check that the filter field name and value are correct."
         )
 
     if not changed_pbi:
         return False, (
-            f"{prefix}FAIL — Filter had NO effect on PBI. "
-            "Slicer may not be connected to any visuals on this page."
+            f"{prefix}FAIL — Filter had NO effect on PBI (PBI changed: 0, Qlik changed: {len(changed_qlik)}). "
+            f"Qlik visuals changed: {sorted(changed_qlik)}. "
+            "Filter did not propagate to visual cards in Power BI."
         )
 
     def _norm(s: str) -> str:
         return re.sub(r"\s+", " ", s.lower().strip())
 
-    norm_qlik = {_norm(t) for t in changed_qlik}
-    norm_pbi  = {_norm(t) for t in changed_pbi}
-    missing_in_pbi = norm_qlik - norm_pbi
+    def _matches_any_pbi(q_title: str, pbi_titles: set[str]) -> bool:
+        q_norm = _norm(q_title)
+        # Direct normalized match
+        if q_norm in {_norm(p) for p in pbi_titles}:
+            return True
+        # Substring / containment match
+        for p in pbi_titles:
+            p_norm = _norm(p)
+            if q_norm in p_norm or p_norm in q_norm:
+                return True
+        # Significant keywords overlap match
+        stop_words = {"of", "by", "the", "in", "for", "and", "a", "an", "isg", "idg", "to", "at", "rate", "usd"}
+        q_words = set(re.findall(r"\w+", q_norm)) - stop_words
+        for p in pbi_titles:
+            p_words = set(re.findall(r"\w+", _norm(p))) - stop_words
+            overlap = q_words & p_words
+            if len(overlap) >= 2 or (len(q_words) > 0 and len(overlap) == len(q_words)):
+                return True
+        return False
+
+    missing_in_pbi = [q for q in changed_qlik if not _matches_any_pbi(q, changed_pbi)]
 
     if missing_in_pbi:
         return False, (
             f"{prefix}FAIL — {len(missing_in_pbi)} Qlik visual(s) did NOT change on PBI: "
             f"{sorted(missing_in_pbi)}. "
-            f"Qlik changed: {sorted(changed_qlik)}. PBI changed: {sorted(changed_pbi)}."
+            f"Qlik changed ({len(changed_qlik)}): {sorted(changed_qlik)}. "
+            f"PBI changed ({len(changed_pbi)}): {sorted(changed_pbi)}."
         )
 
-    extra = norm_pbi - norm_qlik
     return True, (
-        f"{prefix}PASS — {len(changed_qlik)} visual(s) changed on both. "
-        f"{len(extra)} extra in PBI (expected for migration). "
-        f"Qlik: {sorted(changed_qlik)}. PBI: {sorted(changed_pbi)}."
+        f"{prefix}PASS — Filter propagation parity verified. "
+        f"Qlik: {len(changed_qlik)} changes ({sorted(changed_qlik)}), "
+        f"PBI: {len(changed_pbi)} changes ({sorted(changed_pbi)})."
     )
 
 

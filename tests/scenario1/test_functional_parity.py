@@ -180,11 +180,20 @@ def test_visual_existence(tc, pbi_dashboard, config):
     pbi_dashboard.switch_to_page(pbi_page_name)
 
     visual_titles = pbi_dashboard.get_visual_titles()
-    assert len(visual_titles) > 0, (
-        f"{test_id} FAIL — No visuals found on PBI page '{pbi_page_name}'. "
-        "Page may have failed to render or visual container selectors need updating."
+    assert len(visual_titles) >= 3, (
+        f"{test_id} FAIL — Expected at least 3 data visuals on PBI page '{pbi_page_name}', "
+        f"but only found {len(visual_titles)}: {visual_titles}. "
+        "Page may have failed to fully render or visual container selectors need updating."
     )
-    log.info(f"[PASS] {test_id}: Visuals verified on '{pbi_page_name}' ({len(visual_titles)} visuals found)")
+
+    expected_visual = tc.get("Field / Element") or tc.get("Visual Name")
+    if expected_visual and str(expected_visual).strip().lower() not in ("all", "visuals", "none", "nan"):
+        exp_clean = str(expected_visual).strip().lower()
+        assert any(exp_clean in v.lower() for v in visual_titles), (
+            f"{test_id} FAIL — Expected visual '{expected_visual}' not found in page visuals: {visual_titles}"
+        )
+
+    log.info(f"[PASS] {test_id}: Visuals verified on '{pbi_page_name}' ({len(visual_titles)} visuals found: {visual_titles})")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -235,7 +244,7 @@ cat_d_cases = _load_test_cases("D")
 def test_filter_impact_propagation(tc, qlik_dashboard, pbi_dashboard, config):
     """
     FP-D-*: Apply a filter on BOTH Qlik and PBI.
-    Verify that visuals react and propagate filter changes on both platforms.
+    Verify that visuals react and propagate filter changes on both platforms with parity.
     """
     test_id = tc.get("Test ID", "UNKNOWN")
     filter_field = tc.get("Field / Element") or tc.get("Filter Field")
@@ -269,10 +278,11 @@ def test_filter_impact_propagation(tc, qlik_dashboard, pbi_dashboard, config):
         try:
             qlik_dashboard.apply_filter(fld, val)
         except Exception as e:
-            log.warning(f"Could not apply Qlik filter {fld}={val}: {e}")
+            pytest.fail(f"{test_id} FAIL — Could not apply Qlik filter '{fld}'='{val}': {e}")
 
     log.info("STEP 3: Qlik — Capture post-filter state")
     qlik_filtered = qlik_dashboard.capture_baseline()
+    assert len(qlik_filtered) > 0, f"{test_id} FAIL — Post-filter Qlik capture returned 0 visuals on '{qlik_sheet_name}'"
     changed_qlik = detect_changed_visuals(qlik_baseline, qlik_filtered)
     log.info(f"Qlik visuals changed: {sorted(changed_qlik)}")
 
@@ -291,12 +301,16 @@ def test_filter_impact_propagation(tc, qlik_dashboard, pbi_dashboard, config):
     log.info(f"STEP 5: PBI — Apply slicer(s): {list(zip(fields, values))}")
     for fld, val in zip(fields, values):
         try:
-            pbi_dashboard.apply_slicer(fld, val)
+            applied = pbi_dashboard.apply_slicer(fld, val, raise_on_error=True)
+            assert applied, (
+                f"{test_id} FAIL — Slicer/filter '{fld}'='{val}' could not be selected on PBI page '{pbi_page_name}'"
+            )
         except Exception as e:
-            log.warning(f"Could not apply PBI slicer {fld}={val}: {e}")
+            pytest.fail(f"{test_id} FAIL — Failed to apply PBI slicer '{fld}'='{val}' on page '{pbi_page_name}': {e}")
 
     log.info("STEP 6: PBI — Capture post-filter state")
     pbi_filtered = pbi_dashboard.capture_page_baseline()
+    assert len(pbi_filtered) > 0, f"{test_id} FAIL — Post-filter PBI capture returned 0 visuals on '{pbi_page_name}'"
     changed_pbi = detect_changed_visuals(pbi_baseline, pbi_filtered)
     log.info(f"PBI visuals changed: {sorted(changed_pbi)}")
 
@@ -304,7 +318,19 @@ def test_filter_impact_propagation(tc, qlik_dashboard, pbi_dashboard, config):
     pbi_dashboard.clear_all_slicers()
 
     # ── STEP 5: Parity Verification ────────────────────────────────────────────
-    log.info(f"[PASS] {test_id}: Filter propagation executed. Qlik: {len(changed_qlik)} changes, PBI: {len(changed_pbi)} changes.")
+    assert len(changed_qlik) > 0, (
+        f"{test_id} FAIL — Filter {list(zip(fields, values))} had NO effect on Qlik sheet '{qlik_sheet_name}'. "
+        f"0 visuals changed state."
+    )
+    assert len(changed_pbi) > 0, (
+        f"{test_id} FAIL — Filter {list(zip(fields, values))} had NO effect on PBI page '{pbi_page_name}'. "
+        f"PBI visuals changed: 0 (while Qlik had {len(changed_qlik)} changes: {sorted(changed_qlik)}). "
+        f"Filter propagation failed to update visuals."
+    )
+
+    parity_passed, parity_detail = compare_visual_impact(changed_qlik, changed_pbi, test_id=test_id)
+    assert parity_passed, parity_detail
+    log.info(f"[PASS] {parity_detail}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -329,26 +355,50 @@ def test_navigation_and_buttons(tc, pbi_dashboard, config):
     pbi_dashboard.open(report_url)
     pbi_dashboard.switch_to_page(target_page)
 
+    baseline = pbi_dashboard.capture_page_baseline()
+    assert len(baseline) > 0, f"{test_id}: PBI baseline is empty on '{target_page}'"
+
     ctx = pbi_dashboard._ctx()
     # Find button matching label or Revenue/Quantity measure buttons
-    btn = (
-        ctx.locator(f"button:has-text('{button_label}'), [aria-label*='{button_label}']").first
-        if button_label not in ["Measure Toggle", "Measure"]
-        else ctx.locator("button:has-text('Revenue'), button:has-text('Quantity'), [aria-label*='Revenue'], [aria-label*='Quantity']").first
+    if button_label in ["Measure Toggle", "Measure"]:
+        btn = ctx.locator(
+            "button:has-text('Quantity'), [aria-label*='Quantity' i], .buttonSlicer:has-text('Quantity')"
+        ).first
+        if not btn.count() or not btn.is_visible(timeout=2_000):
+            btn = ctx.locator(
+                "button:has-text('Revenue'), [aria-label*='Revenue' i], .buttonSlicer:has-text('Revenue')"
+            ).first
+    else:
+        btn = ctx.locator(
+            f"button:has-text('{button_label}'), [aria-label*='{button_label}' i], [title*='{button_label}' i]"
+        ).first
+
+    assert btn.count() > 0 and btn.is_visible(timeout=3_000), (
+        f"{test_id} FAIL — Interactive button/toggle '{button_label}' not found or visible on PBI page '{target_page}'."
     )
 
-    if not btn.count() or not btn.is_visible(timeout=3_000):
-        # Look for visual-container containing Measure toggle
-        measure_container = ctx.locator("visual-container:has-text('Measure'), visual-container:has-text('Revenue')").first
-        assert measure_container.count() > 0, (
-            f"{test_id} FAIL — Measure toggle visual not found on PBI page '{target_page}'"
-        )
-        log.info(f"[PASS] {test_id}: Measure toggle container verified on '{target_page}'")
-        return
+    btn.click(timeout=3_000)
+    pbi_dashboard.page.wait_for_timeout(3_000)
 
-    btn.click()
-    pbi_dashboard.page.wait_for_timeout(2_000)
-    log.info(f"[PASS] {test_id}: Action '{button_label}' successfully verified on '{target_page}'")
+    post_click = pbi_dashboard.capture_page_baseline()
+    assert len(post_click) > 0, f"{test_id} FAIL — Post-click PBI capture returned 0 visuals on '{target_page}'"
+    changed = detect_changed_visuals(baseline, post_click)
+    assert len(changed) > 0, (
+        f"{test_id} FAIL — Clicking button/toggle '{button_label}' did not alter any visual states on '{target_page}'. "
+        f"Baseline: {baseline}, Post-click: {post_click}"
+    )
+
+    # Restore baseline if toggled measure
+    if button_label in ["Measure Toggle", "Measure"]:
+        reset_btn = ctx.locator("button:has-text('Revenue'), [aria-label*='Revenue' i]").first
+        if reset_btn.count() > 0 and reset_btn.is_visible(timeout=1_000):
+            try:
+                reset_btn.click(timeout=2_000)
+                pbi_dashboard.page.wait_for_timeout(1_500)
+            except Exception:
+                pass
+
+    log.info(f"[PASS] {test_id}: Action '{button_label}' successfully verified on '{target_page}' ({len(changed)} visual(s) updated: {sorted(changed)})")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -374,6 +424,7 @@ def test_cross_filter_behavior(tc, pbi_dashboard, config):
     pbi_dashboard.switch_to_page(pbi_page_name)
 
     baseline = pbi_dashboard.capture_page_baseline()
+    assert len(baseline) > 0, f"{test_id}: Baseline is empty on '{pbi_page_name}'"
     ctx = pbi_dashboard._ctx()
 
     bar = ctx.locator(
@@ -382,22 +433,23 @@ def test_cross_filter_behavior(tc, pbi_dashboard, config):
         f"[role='gridcell']:has-text('{target_segment}'), "
         f"span:has-text('{target_segment}')"
     ).first
-    if not bar.count() or not bar.is_visible(timeout=3_000):
-        # Fallback: check visual container
-        vis = ctx.locator(f"visual-container:has-text('{chart_name}')").first
-        if vis.count():
-            log.info(f"[PASS] {test_id}: Cross-filter visual '{chart_name}' exists on '{pbi_page_name}'")
-            return
-        pytest.skip(f"{test_id}: Segment '{target_segment}' in visual '{chart_name}' not accessible via DOM locator.")
+    assert bar.count() > 0 and bar.is_visible(timeout=4_000), (
+        f"{test_id} FAIL — Segment '{target_segment}' in visual '{chart_name}' not found on '{pbi_page_name}'."
+    )
 
-    bar.click()
+    bar.click(timeout=3_000)
     pbi_dashboard.page.wait_for_timeout(3_000)
 
     post_click = pbi_dashboard.capture_page_baseline()
+    assert len(post_click) > 0, f"{test_id} FAIL — Post-click PBI capture returned 0 visuals on '{pbi_page_name}'"
     changed = detect_changed_visuals(baseline, post_click)
     pbi_dashboard.clear_all_slicers()
 
-    log.info(f"[PASS] {test_id}: Cross-filter interaction verified on '{pbi_page_name}'")
+    assert len(changed) > 0, (
+        f"{test_id} FAIL — Cross-filtering on '{target_segment}' in visual '{chart_name}' did not update any other visuals on '{pbi_page_name}'."
+    )
+
+    log.info(f"[PASS] {test_id}: Cross-filter interaction verified on '{pbi_page_name}' ({len(changed)} visual(s) changed: {sorted(changed)})")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -423,10 +475,30 @@ def test_filter_clear_restores_baseline(tc, qlik_dashboard, pbi_dashboard, confi
     baseline = pbi_dashboard.capture_page_baseline()
     assert len(baseline) > 0, f"{test_id}: PBI baseline is empty."
 
-    # Clear slicers to confirm reset state
-    pbi_dashboard.clear_all_slicers()
-    post_clear = pbi_dashboard.capture_page_baseline()
+    # 1. Apply a test slicer to perturb state away from baseline
+    test_slicer = "GEO Level 3"
+    test_val = "BENELUX"
+    log.info(f"Applying test perturbation filter: {test_slicer} = {test_val}")
+    applied = pbi_dashboard.apply_slicer(test_slicer, test_val, raise_on_error=True)
+    assert applied, f"{test_id} FAIL — Failed to apply perturbation filter '{test_slicer}'='{test_val}'"
+    pbi_dashboard.page.wait_for_timeout(2_000)
 
-    changed = detect_changed_visuals(baseline, post_clear)
-    assert not changed, f"{test_id} FAIL — Residual state after clearing slicers. Changed: {sorted(changed)}"
+    perturbed = pbi_dashboard.capture_page_baseline()
+    assert len(perturbed) > 0, f"{test_id} FAIL — Perturbed PBI capture returned 0 visuals on '{pbi_page_name}'"
+    changed_perturb = detect_changed_visuals(baseline, perturbed)
+    assert len(changed_perturb) > 0, (
+        f"{test_id} FAIL — Perturbation slicer '{test_slicer}'='{test_val}' did not alter any visuals "
+        f"on '{pbi_page_name}'. Cannot test reset integrity without verified state perturbation."
+    )
+    log.info(f"Perturbation confirmed: {len(changed_perturb)} visual(s) changed: {sorted(changed_perturb)}")
+
+    # 2. Clear slicers to restore default state
+    pbi_dashboard.clear_all_slicers()
+    pbi_dashboard.page.wait_for_timeout(2_000)
+    post_clear = pbi_dashboard.capture_page_baseline()
+    assert len(post_clear) > 0, f"{test_id} FAIL — Post-clear PBI capture returned 0 visuals on '{pbi_page_name}'"
+
+    # 3. Assert baseline is restored (zero residual bleed)
+    residual = detect_changed_visuals(baseline, post_clear)
+    assert not residual, f"{test_id} FAIL — Residual state after clearing slicers. Changed: {sorted(residual)}"
     log.info(f"[PASS] {test_id}: State isolation confirmed — clean baseline restored")
