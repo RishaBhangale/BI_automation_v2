@@ -119,7 +119,10 @@ class PBIDashboardPage(BasePage):
         """Handle SSO redirect: pause for user login in headed browser instead of crashing."""
         url = self.page.url.lower()
         if any(host in url for host in _LOGIN_HOSTS):
-            self.capture_screenshot("pbi_sso_required")
+            try:
+                self.capture_screenshot("pbi_sso_required")
+            except Exception:
+                pass
             log.warning(
                 f"[AUTH REQUIRED] Power BI redirected to login page ({self.page.url[:80]}...). "
                 "Please complete SSO in the open browser window. Waiting up to 60s..."
@@ -127,14 +130,14 @@ class PBIDashboardPage(BasePage):
             try:
                 self.page.wait_for_url(
                     lambda u: not any(host in u.lower() for host in _LOGIN_HOSTS) and "powerbi.com" in u.lower(),
-                    timeout=60_000,
+                    timeout=90_000,
                 )
                 log.info("SSO completed! Report loading...")
                 self._wait_for_pbi_load()
             except Exception:
                 raise RuntimeError(
                     f"Power BI redirected to login page ({self.page.url[:80]}...) "
-                    "and SSO was not completed within 60s."
+                    "and SSO was not completed within 90s."
                 )
 
     def _get_frame(self) -> Optional[FrameLocator]:
@@ -186,6 +189,7 @@ class PBIDashboardPage(BasePage):
             for el in els:
                 try:
                     name = (el.get_attribute("aria-label") or el.inner_text() or "").strip()
+                    name = re.sub(r"\s+Selected$", "", name, flags=re.I).strip()
                 except Exception:
                     continue
                 if name and name.lower() not in _NOT_PAGE_NAMES and name not in names:
@@ -509,7 +513,7 @@ class PBIDashboardPage(BasePage):
                     }
                     // 3. Rect/path bars and slices with aria-label
                     if (!val) {
-                        const rects = Array.from(vc.querySelectorAll("rect.bar[aria-label], g.slice[aria-label], path.slice[aria-label]"))
+                        const rects = Array.from(vc.querySelectorAll("rect[aria-label], [data-automation-type*='chart-rect'][aria-label], g.slice[aria-label], path.slice[aria-label], path[aria-label]"))
                             .map(e => e.getAttribute("aria-label")).filter(Boolean);
                         if (rects.length > 0) val = rects.slice(0, 8).join(", ");
                     }
@@ -564,24 +568,69 @@ class PBIDashboardPage(BasePage):
         """
         try:
             self.page.keyboard.press("Escape")
-            self.page.wait_for_timeout(100)
-
-            # Click canvas margin padding in an empty area
-            canvas = self.page.locator(".exploreCanvas, .displayAreaContainer, .canvasFlexBox, .visualArea").first
-            if canvas.count() > 0 and canvas.is_visible():
-                try:
-                    canvas.click(position={"x": 5, "y": 5}, timeout=1_500)
-                    self.page.wait_for_timeout(200)
-                except Exception:
-                    self.page.mouse.click(500, 110)
-            else:
-                self.page.mouse.click(500, 110)
-                self.page.wait_for_timeout(200)
-
+            self.page.wait_for_timeout(150)
             self.page.keyboard.press("Escape")
-            self.page.wait_for_timeout(200)
+            self.page.wait_for_timeout(150)
         except Exception as e:
             log.debug(f"Deselect visuals error (non-fatal): {e}")
+
+    def ensure_filters_pane_open(self) -> bool:
+        """
+        Ensure the Power BI Filters Pane on the right is expanded.
+        If collapsed, clicks the expand button.
+        """
+        ctx = self._ctx()
+        check_script = """
+            () => {
+                const pane = document.querySelector(".filtersPane, [class*='filtersPane'], [data-automation-type='filterPane'], [aria-label='Filters']");
+                if (pane) {
+                    const rect = pane.getBoundingClientRect();
+                    return rect.width > 50;
+                }
+                return false;
+            }
+        """
+        try:
+            is_open = self.page.evaluate(check_script)
+            if is_open:
+                return True
+        except Exception:
+            pass
+
+        expand_selectors = [
+            "button[aria-label*='Expand filter' i]",
+            "button[aria-label*='Expand Filters' i]",
+            "button[aria-label*='Expand' i][aria-label*='filter' i]",
+            "button[aria-label*='Expand' i]",
+            "[data-automation-id='filters-pane-expand-button']",
+            ".filtersPaneCollapsed button",
+            "button.expandPaneBtn",
+            "button:has(.pbi-glyph-chevronleft)",
+            "button:has(.pbi-glyph-chevronright)",
+            "[title*='Expand filter' i]",
+        ]
+        for sel in expand_selectors:
+            try:
+                btn = ctx.locator(sel).first
+                if btn.count() > 0 and btn.is_visible(timeout=500):
+                    btn.click(timeout=1_500, force=True)
+                    self.page.wait_for_timeout(600)
+                    log.info(f"Expanded Filters Pane using selector: {sel}")
+                    return True
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
+    def _stem_word(word: str) -> str:
+        w = re.sub(r"[^a-z0-9]", "", word.lower().strip())
+        if w.startswith("opp"):
+            return "opp"
+        if w.startswith("rev"):
+            return "rev"
+        if w.startswith("quant") or w.startswith("qty"):
+            return "qty"
+        return w
 
     def select_visual(self, visual_target: Optional[str] = None) -> bool:
         """
@@ -603,8 +652,12 @@ class PBIDashboardPage(BasePage):
                 is_target_qty = ("quant" in v_clean) or ("qty" in v_clean)
                 is_target_rev = ("rev" in v_clean) or ("usd" in v_clean) or ("rate" in v_clean)
 
-                stop_words = {"revenue", "quantity", "by", "the", "for", "in", "of", "and", "usd", "@", "actual", "rate"}
-                target_tokens = [w for w in re.split(r"\s+", v_clean) if len(w) > 2 and w not in stop_words]
+                stop_words = {"by", "the", "for", "in", "of", "and", "usd", "@", "actual", "rate"}
+                target_stems = [
+                    PBIDashboardPage._stem_word(w)
+                    for w in re.split(r"\s+", v_clean)
+                    if len(w) > 1 and w not in stop_words
+                ]
 
                 selectors = [
                     f"visual-container:has([class*='visualTitle']:has-text('{visual_target}'))",
@@ -613,15 +666,45 @@ class PBIDashboardPage(BasePage):
                     f"visual-container:has-text('{visual_target}')",
                     f"[class*='visualContainer']:has-text('{visual_target}')",
                 ]
+                v_words = [w for w in re.split(r"\s+", v_clean) if len(w) > 2 and w not in stop_words]
+                if len(v_words) >= 2:
+                    phrase = " ".join(v_words[:3])
+                    selectors.append(f"visual-container:has-text('{phrase}')")
+                    selectors.append(f"[class*='visualContainer']:has-text('{phrase}')")
+
                 for sel in selectors:
                     loc = ctx.locator(sel).first
-                    if loc.count() > 0 and loc.is_visible(timeout=500):
+                    if loc.count() > 0 and loc.is_visible(timeout=1_500):
+                        if loc.locator(".buttonSlicerVisual, [class*='buttonSlicer']").count() > 0:
+                            continue
                         candidate_vis = loc
                         log.debug(f"Matched target visual with selector: {sel}")
                         break
 
+                # If exact visual target did not match a data chart (e.g. 'Quantity of Overdue Opportunities'
+                # when chart has author title 'Revenue of Overdue Opportunities'), search via core phrase
+                if not candidate_vis:
+                    core_target = re.sub(r"^(quantity|revenue)\s+of\s+", "", visual_target, flags=re.I).strip()
+                    if core_target and core_target.lower() != visual_target.lower():
+                        core_selectors = [
+                            f"visual-container:has([class*='visualTitle']:has-text('{core_target}'))",
+                            f"visual-container:has-text('{core_target}')",
+                            f"[class*='visualContainer'][aria-label*='{core_target}' i]",
+                        ]
+                        for sel in core_selectors:
+                            loc = ctx.locator(sel).first
+                            if loc.count() > 0 and loc.is_visible(timeout=1_500):
+                                if loc.locator(".buttonSlicerVisual, [class*='buttonSlicer']").count() > 0:
+                                    continue
+                                candidate_vis = loc
+                                log.debug(f"Matched target visual via core target '{core_target}' with selector: {sel}")
+                                break
+
                 if not candidate_vis:
                     all_vcs = ctx.locator("visual-container, [data-automation-type='visualContainer']").all()
+                    best_match_vc = None
+                    best_match_score = 0
+
                     for vc in all_vcs:
                         try:
                             if vc.locator(".buttonSlicerVisual, [class*='buttonSlicer']").count() > 0:
@@ -636,50 +719,38 @@ class PBIDashboardPage(BasePage):
                             if is_target_rev and ("quantity" in combined or "qty" in combined) and ("revenue" not in combined and "rev" not in combined and "usd" not in combined):
                                 continue
 
-                            if target_tokens and all(tok in combined for tok in target_tokens):
-                                candidate_vis = vc
-                                log.debug(f"Matched target visual via tokens {target_tokens}")
-                                break
-                            elif not target_tokens and (is_target_qty or is_target_rev):
-                                if is_target_qty and ("quantity" in combined or "qty" in combined):
-                                    candidate_vis = vc
-                                    log.debug("Matched target visual via Quantity measure token")
-                                    break
-                                elif is_target_rev and ("revenue" in combined or "rev" in combined or "usd" in combined):
-                                    candidate_vis = vc
-                                    log.debug("Matched target visual via Revenue measure token")
-                                    break
+                            cand_stems = [PBIDashboardPage._stem_word(w) for w in re.split(r"\s+", combined)]
+                            match_count = sum(1 for st in target_stems if st in cand_stems or st in combined)
+
+                            if match_count > best_match_score:
+                                best_match_score = match_count
+                                best_match_vc = vc
                         except Exception:
                             continue
 
+                    min_required = max(1, len(target_stems) - 1) if len(target_stems) >= 2 else 1
+                    if best_match_vc and best_match_score >= min_required:
+                        candidate_vis = best_match_vc
+                        log.debug(f"Matched target visual via stemmed tokens {target_stems} (score={best_match_score}/{len(target_stems)})")
+
             if not candidate_vis:
                 data_vis_selectors = [
-                    "visual-container:has([aria-roledescription*='chart' i])",
-                    "visual-container:has([aria-roledescription*='table' i])",
-                    "visual-container:has(svg)",
+                    "visual-container:has([role='grid'])",
                     "visual-container:has([class*='tablix'])",
                     "visual-container:has([class*='pivotTable'])",
+                    "visual-container:has([aria-roledescription*='table' i])",
+                    "visual-container:has([aria-roledescription*='chart' i])",
+                    "visual-container:has(svg.cartesian-chart)",
+                    "visual-container:has(svg)",
                 ]
                 for d_sel in data_vis_selectors:
                     loc = ctx.locator(d_sel).first
                     if loc.count() > 0 and loc.is_visible(timeout=500):
+                        if loc.locator(".buttonSlicerVisual, [class*='buttonSlicer']").count() > 0:
+                            continue
                         candidate_vis = loc
                         log.debug(f"Matched fallback data visual with selector: {d_sel}")
                         break
-
-            # Fallback: pick the first visible canvas visual container (excluding toggle button slicers)
-            if not candidate_vis:
-                all_vcs = ctx.locator("visual-container, [data-automation-type='visualContainer']").all()
-                for vc in all_vcs:
-                    try:
-                        if vc.locator(".buttonSlicerVisual, [class*='buttonSlicer']").count() > 0:
-                            continue
-                        if vc.is_visible(timeout=400):
-                            candidate_vis = vc
-                            log.debug("Matched first visible non-toggle canvas visual container")
-                            break
-                    except Exception:
-                        continue
 
             if not candidate_vis:
                 log.warning(f"Could not locate visual '{visual_target}' on canvas to select")
@@ -688,38 +759,28 @@ class PBIDashboardPage(BasePage):
             candidate_vis.scroll_into_view_if_needed()
             clicked = False
 
-            # 1. Right-click activation: as shown in Image 1, right-clicking the visual
-            # populates and focuses 'Filters on this visual' in the Filters Pane.
-            try:
-                candidate_vis.click(button="right", timeout=2_000, force=True)
-                clicked = True
-                self.page.wait_for_timeout(400)
-                # Press Escape to dismiss the context menu ('Copy', 'Share', etc.) without losing visual selection
-                self.page.keyboard.press("Escape")
-                self.page.wait_for_timeout(200)
-                log.info(f"Visual '{visual_target or '<primary data visual>'}' right-clicked to activate visual filters")
-            except Exception as ex_r:
-                log.debug(f"Right-click on visual container failed: {ex_r}")
+            # 1. Header click: click visual title or header wrapper with force=True
+            header = candidate_vis.locator(
+                "[class*='visualTitle'], [class*='header-title'], h3, .visualHeader, .visualHeaderWrapper, .header-text"
+            ).first
+            if header.count() > 0 and header.is_visible(timeout=800):
+                try:
+                    header.click(timeout=1_500, force=True)
+                    clicked = True
+                    self.page.wait_for_timeout(400)
+                    log.info(f"Visual '{visual_target or '<primary data visual>'}' selected via header click")
+                except Exception as ex_h:
+                    log.debug(f"Header click failed: {ex_h}")
 
-            # 2. Header click fallback
-            if not clicked:
-                header = candidate_vis.locator(
-                    "[class*='visualTitle'], [class*='header-title'], h3, .visualHeader, .visualHeaderWrapper, .header-text"
-                ).first
-                if header.count() > 0 and header.is_visible(timeout=800):
-                    try:
-                        header.click(timeout=1_500, force=True)
-                        clicked = True
-                    except Exception as ex_h:
-                        log.debug(f"Header click with force failed: {ex_h}")
-
-            # 3. Margin click fallback
+            # 2. Container margin click fallback: click corner offset without opening context menu
             if not clicked:
                 try:
-                    candidate_vis.click(position={"x": 15, "y": 15}, timeout=1_500, force=True)
+                    candidate_vis.click(position={"x": 25, "y": 25}, timeout=1_500, force=True)
                     clicked = True
+                    self.page.wait_for_timeout(400)
+                    log.info(f"Visual '{visual_target or '<primary data visual>'}' selected via container margin click")
                 except Exception as ex_c:
-                    log.debug(f"Container margin click with force failed: {ex_c}")
+                    log.debug(f"Container margin click failed: {ex_c}")
 
             # 4. Dispatch event fallback
             if not clicked:
@@ -753,29 +814,95 @@ class PBIDashboardPage(BasePage):
             return False
 
         log.info(f"Setting metric toggle to: '{target}'")
-        selectors = [
-            f"[class*='buttonSlicerVisual'] div[title='{target}']",
-            f"[class*='button-slicer-text-wrap'] :text-is('{target}')",
-            f"div[title='{target}']",
-            f"button:has-text('{target}')",
-            f"[role='button']:has-text('{target}')",
+
+        # 1. First, check modern Power BI Button Slicer (.buttonSlicerVisual)
+        cell_selectors = [
+            f".buttonSlicerVisual[role='button']:has([title='{target}'])",
+            f".buttonSlicerVisual[role='button']:has-text('{target}')",
+            f".buttonSlicerVisual:has([title='{target}'])",
+            f".buttonSlicerVisual:has-text('{target}')",
+            f"[class*='buttonSlicer']:has([title='{target}'])",
+            f"[class*='buttonSlicer']:has-text('{target}')",
         ]
-        clicked = False
-        for sel in selectors:
+
+        target_cell = None
+        for c_sel in cell_selectors:
+            loc = ctx.locator(c_sel).first
             try:
-                btn = ctx.locator(sel).first
-                if btn.count() > 0 and btn.is_visible(timeout=1_500):
-                    btn.click(timeout=3_000)
-                    self.page.wait_for_timeout(1_500)
-                    log.info(f"Metric toggle '{target}' clicked successfully")
-                    clicked = True
+                if loc.count() > 0 and loc.is_visible(timeout=1_000):
+                    target_cell = loc
                     break
             except Exception:
                 continue
-        if clicked:
-            self.deselect_all_visuals()
-            self.page.wait_for_timeout(1_000)
-            return True
+
+        if target_cell and target_cell.count() > 0:
+            is_pressed = target_cell.get_attribute("aria-pressed") == "true" or "selected" in (target_cell.get_attribute("class") or "").lower()
+            if is_pressed:
+                log.info(f"Metric toggle '{target}' is already active (aria-pressed=true)")
+                self.page.wait_for_timeout(500)
+                return True
+
+            log.info(f"Activating metric toggle '{target}' button slicer")
+            try:
+                target_cell.scroll_into_view_if_needed(timeout=1_000)
+            except Exception:
+                pass
+
+            clicked = False
+            click_targets = [
+                target_cell.locator("path.ui-role-button-fill, path.fill, .tile").first,
+                target_cell,
+                target_cell.locator(f".ui-role-button-text, [title='{target}']").first,
+            ]
+            for ct in click_targets:
+                try:
+                    if ct.count() > 0 and ct.is_visible(timeout=500):
+                        ct.click(timeout=2_000, force=True)
+                        self.page.wait_for_timeout(400)
+                        if target_cell.get_attribute("aria-pressed") == "true":
+                            clicked = True
+                            break
+                except Exception:
+                    continue
+
+            if not clicked:
+                try:
+                    target_cell.dispatch_event("click")
+                    self.page.wait_for_timeout(400)
+                    if target_cell.get_attribute("aria-pressed") == "true":
+                        clicked = True
+                except Exception:
+                    pass
+
+            for _ in range(10):
+                if target_cell.get_attribute("aria-pressed") == "true":
+                    clicked = True
+                    break
+                self.page.wait_for_timeout(200)
+
+            if clicked:
+                log.info(f"Metric toggle '{target}' toggled and verified (aria-pressed=true)")
+                self.page.wait_for_timeout(1_500)
+                return True
+
+        # 2. Fallback to generic button selectors (classic bookmarks / shapes)
+        fallback_selectors = [
+            f"[role='button']:has-text('{target}')",
+            f"button:has-text('{target}')",
+            f"div[title='{target}']",
+            f"[role='button'][title='{target}']",
+        ]
+        for sel in fallback_selectors:
+            try:
+                btn = ctx.locator(sel).first
+                if btn.count() > 0 and btn.is_visible(timeout=1_000):
+                    btn.click(timeout=2_000, force=True)
+                    self.page.wait_for_timeout(1_500)
+                    log.info(f"Metric toggle '{target}' clicked via fallback selector: {sel}")
+                    return True
+            except Exception:
+                continue
+
         log.debug(f"Metric toggle '{target}' not found on current page")
         return False
 
@@ -811,55 +938,96 @@ class PBIDashboardPage(BasePage):
             () => {{
                 const targetLower = '{target_clean}'.toLowerCase().trim();
                 const targetWords = targetLower.split(/\\s+/).filter(w => w.length > 2);
+                const stem = w => {{
+                    let s = (w || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                    if (s.startsWith('opp')) return 'opp';
+                    if (s.startsWith('rev')) return 'rev';
+                    if (s.startsWith('quant') || s.startsWith('qty')) return 'qty';
+                    return s;
+                }};
+
+                const stopWords = ['the', 'for', 'in', 'of', 'and', 'usd', 'actual', 'rate', 'by'];
+                const targetTokens = targetLower.split(/\\s+/).map(stem).filter(w => w.length > 1 && !stopWords.includes(w));
                 const catFilters = {cats_json};
 
                 const isTargetQty = targetLower.includes('quant') || targetLower.includes('qty');
                 const isTargetRev = targetLower.includes('rev') || targetLower.includes('usd') || targetLower.includes('rate');
 
                 // 1. Find matching visual container
-                const vcs = Array.from(document.querySelectorAll('visual-container, [class*=\"visualContainer\"]'));
+                const vcs = Array.from(document.querySelectorAll('visual-container, [class*="visualContainer"]'));
                 let targetVc = null;
 
+                const hasChartVisual = vc => vc.querySelector('svg.cartesian-chart, [data-automation-type*="chart-rect"], rect[aria-label], path[aria-label]') !== null;
+                const hasCategoryMatch = vc => {{
+                    if (catFilters.length === 0) return false;
+                    const texts = Array.from(vc.querySelectorAll('text')).map(t => (t.textContent || '').trim().toLowerCase());
+                    return catFilters.some(cf => texts.some(t => t.includes(cf) || cf.includes(t)));
+                }};
+
+                let bestScore = -1;
                 for (const vc of vcs) {{
-                    const titleEl = vc.querySelector(\"[class*='visualTitle'], h3, [class*='header-title']\");
+                    if (vc.querySelector('.buttonSlicerVisual, [class*="buttonSlicer"]')) continue;
+
+                    const titleEl = vc.querySelector("[class*='visualTitle'], h3, [class*='header-title']");
                     const tText = (titleEl ? titleEl.textContent : '').toLowerCase().trim();
                     const aria = (vc.getAttribute('aria-label') || '').toLowerCase().trim();
                     const combined = tText + ' ' + aria;
 
-                    // Differentiate Measure Tokens: prevent cross-measure matching
-                    if (isTargetQty && (combined.includes('revenue') || combined.includes('rev ') || combined.includes('usd'))) continue;
-                    if (isTargetRev && (combined.includes('quantity') || combined.includes('qty'))) continue;
+                    const catMatch = hasCategoryMatch(vc);
+                    const isChart = hasChartVisual(vc);
 
-                    if (tText.includes(targetLower) || aria.includes(targetLower)) {{
-                        targetVc = vc;
-                        break;
+                    // If it has category match on the chart, do not disqualify due to measure keywords in static title
+                    if (!catMatch) {{
+                        if (isTargetQty && (combined.includes('revenue') || combined.includes('rev ') || combined.includes('usd'))) continue;
+                        if (isTargetRev && (combined.includes('quantity') || combined.includes('qty'))) continue;
                     }}
-                    const matchWords = targetWords.filter(w => tText.includes(w) || aria.includes(w));
-                    if (matchWords.length >= Math.min(2, targetWords.length) && targetWords.length > 0) {{
+
+                    const candTokens = combined.split(/\\s+/).map(stem);
+                    const matchWords = targetTokens.filter(t => candTokens.includes(t) || combined.includes(t));
+
+                    let score = 0;
+                    if (tText.includes(targetLower) || aria.includes(targetLower)) score += 100;
+                    score += matchWords.length * 25;
+
+                    if (catFilters.length > 0) {{
+                        if (catMatch) score += 150;
+                        if (isChart) score += 50;
+                        if (combined.includes('by market') || combined.includes('by geolevel3') || combined.includes('by region')) score += 80;
+                    }}
+
+                    if (score > bestScore && score > 0) {{
+                        bestScore = score;
                         targetVc = vc;
-                        break;
                     }}
                 }}
 
                 if (!targetVc) {{
                     for (const vc of vcs) {{
+                        if (vc.querySelector('.buttonSlicerVisual, [class*="buttonSlicer"]')) continue;
                         const fullText = (vc.textContent || '').toLowerCase();
-                        if (isTargetQty && (fullText.includes('revenue') || fullText.includes('rev ') || fullText.includes('usd'))) continue;
-                        if (isTargetRev && (fullText.includes('quantity') || fullText.includes('qty'))) continue;
+                        const catMatch = hasCategoryMatch(vc);
+                        if (!catMatch) {{
+                            if (isTargetQty && (fullText.includes('revenue') || fullText.includes('rev ') || fullText.includes('usd'))) continue;
+                            if (isTargetRev && (fullText.includes('quantity') || fullText.includes('qty'))) continue;
+                        }}
 
-                        const matchWords = targetWords.filter(w => fullText.includes(w));
-                        if (matchWords.length === targetWords.length && targetWords.length > 0) {{
+                        const candTokens = fullText.split(/\\s+/).map(stem);
+                        const matchWords = targetTokens.filter(t => candTokens.includes(t) || fullText.includes(t));
+                        if (matchWords.length >= Math.max(1, targetTokens.length - 1) && targetTokens.length > 0) {{
                             targetVc = vc;
                             break;
                         }}
                     }}
                 }}
 
-                if (!targetVc) {{
-                    targetVc = document.querySelector(
+                if (!targetVc && !targetLower) {{
+                    const selVc = document.querySelector(
                         'visual-container.selected, visual-container.visualContainerFocused, ' +
                         'visual-container:has([class*="selected"]), visual-container:has(.visualContainerSelection)'
                     );
+                    if (selVc && !selVc.querySelector('.buttonSlicerVisual, [class*="buttonSlicer"]') && (hasChartVisual(selVc) || selVc.querySelector("[class*='kpiValue'], [class*='visualValue']"))) {{
+                        targetVc = selVc;
+                    }}
                 }}
 
                 if (!targetVc) return null;
@@ -881,11 +1049,8 @@ class PBIDashboardPage(BasePage):
 
                 // 3. Case B: Bar / Column Chart with rect[aria-label] and axis tick labels
                 const barRects = Array.from(targetVc.querySelectorAll(
-                    '[data-automation-type=\"column-chart-rect\"], [data-automation-type=\"bar-chart-rect\"], rect[aria-label]'
-                )).filter(r => {{
-                    const a = r.getAttribute('aria-label');
-                    return a && !isNaN(parseFloat(a));
-                }});
+                    '[data-automation-type="column-chart-rect"], [data-automation-type="bar-chart-rect"], rect[aria-label]'
+                )).filter(r => r.getAttribute('aria-label') !== null);
 
                 const dedup = s => {{
                     if (s.length % 2 === 0 && s.slice(0, s.length / 2) === s.slice(s.length / 2)) {{
@@ -898,6 +1063,7 @@ class PBIDashboardPage(BasePage):
                 const nonNumericAxis = [];
                 for (const t of axisTickEls) {{
                     if (!t || /^[\\d.,]+[kmgb%]?$/i.test(t) || t.includes('GEO Level') || t.includes('Measure')) continue;
+                    if (t.toLowerCase().includes('% of') || t.toLowerCase().includes('total')) continue;
                     if (!nonNumericAxis.includes(t)) nonNumericAxis.push(t);
                 }}
 
@@ -906,8 +1072,9 @@ class PBIDashboardPage(BasePage):
                     const catMap = {{}};
                     barRects.forEach((r, i) => {{
                         const cat = nonNumericAxis[i % nCats];
-                        const val = parseFloat(r.getAttribute('aria-label'));
-                        if (cat && !isNaN(val)) {{
+                        const rawAria = r.getAttribute('aria-label');
+                        const val = (rawAria && rawAria !== 'null' && !isNaN(parseFloat(rawAria))) ? parseFloat(rawAria) : 0;
+                        if (cat) {{
                             if (!(cat in catMap)) {{
                                 catMap[cat] = val;
                             }}
@@ -917,16 +1084,30 @@ class PBIDashboardPage(BasePage):
                     if (catFilters.length > 0) {{
                         let matchedSum = 0;
                         let found = false;
+                        const matchedCats = [];
                         for (const [cName, val] of Object.entries(catMap)) {{
                             if (catFilters.some(cf => cName.toLowerCase().includes(cf) || cf.includes(cName.toLowerCase()))) {{
                                 matchedSum += val;
+                                matchedCats.push(`${{cName}}: ${{val}}`);
                                 found = true;
                             }}
                         }}
-                        if (found) return String(matchedSum);
+                        if (found) {{
+                            return JSON.stringify({{
+                                val: String(matchedSum),
+                                catMap: catMap,
+                                matchedCats: matchedCats,
+                                nCats: nCats,
+                                nonNumericAxis: nonNumericAxis
+                            }});
+                        }}
                     }} else {{
                         const total = Object.values(catMap).reduce((a, b) => a + b, 0);
-                        return String(total);
+                        return JSON.stringify({{
+                            val: String(total),
+                            catMap: catMap,
+                            nCats: nCats
+                        }});
                     }}
                 }}
 
@@ -967,11 +1148,11 @@ class PBIDashboardPage(BasePage):
                 }}
 
                 // 5. Case D: Table Visual gridcells
-                const gridcells = Array.from(targetVc.querySelectorAll(\"[role='gridcell'], [class*='pivotTableCellWrap']\"));
+                const gridcells = Array.from(targetVc.querySelectorAll("[role='gridcell'], [class*='pivotTableCellWrap']"));
                 if (gridcells.length > 0) {{
                     for (const cell of gridcells) {{
                         const txt = cell.textContent.trim();
-                        if (txt && /[\\d]/.test(txt)) return txt;
+                        if (txt && !/^[a-zA-Z]{{2,4}}-/i.test(txt) && /^[\\$€£]?\\s*[\\d,]+(?:\\.\\d+)?\\s*[KkMmBb%]?$/.test(txt)) return txt;
                     }}
                 }}
 
@@ -987,17 +1168,94 @@ class PBIDashboardPage(BasePage):
         """
 
         try:
-            raw = self.page.evaluate(eval_script)
-            if raw:
-                log.info(f"Extracted visual value for '{visual_target}': '{raw}'")
-                return str(raw).strip()
+            raw_eval = self.page.evaluate(eval_script)
+            if raw_eval:
+                import json
+                if isinstance(raw_eval, str) and raw_eval.strip().startswith("{"):
+                    try:
+                        data = json.loads(raw_eval)
+                        raw = data.get("val")
+                        if "catMap" in data:
+                            log.info(f"Visual '{visual_target}' category breakdown: {data['catMap']}")
+                        if "matchedCats" in data:
+                            log.info(f"Visual '{visual_target}' matched categories: {data['matchedCats']}")
+                    except Exception:
+                        raw = raw_eval
+                else:
+                    raw = raw_eval
+                if raw:
+                    log.info(f"Extracted visual value for '{visual_target}': '{raw}'")
+                    return str(raw).strip()
         except Exception as e:
             log.warning(f"Error evaluating visual extraction for '{visual_target}': {e}")
 
         return None
 
+    def _card_matches(
+        self,
+        card: Any,
+        target_name: str,
+        value: Optional[str] = None,
+        tokens: Optional[list[str]] = None,
+    ) -> bool:
+        """Robustly match a Power BI Filters Pane filter card against target slicer/field name."""
+        try:
+            t_el = card.locator("[data-testid='filter-card-title'], .textLabel, .title").first
+            t_text = (t_el.inner_text(timeout=300) if t_el.count() > 0 else "")
+            if not t_text and t_el.count() > 0:
+                t_text = t_el.text_content() or ""
+            t_text = t_text.strip().lower()
+            aria = (card.get_attribute("aria-label") or "").strip().lower()
+            title_attr = (card.get_attribute("title") or "").strip().lower()
+            card_text = (card.text_content() or "").strip().lower()
+            combined = f"{t_text} {aria} {title_attr} {card_text[:120]}"
+
+            t_clean = target_name.strip().lower().replace("[", " ").replace("]", " ")
+
+            # 1. Level 3 vs Level 1 disambiguation
+            if "level 3" in t_clean or "level3" in t_clean:
+                if "level 3" in t_text or "level3" in t_text:
+                    return True
+                if "level 1" in t_text or "level1" in t_text or "level 2" in t_text or "level2" in t_text:
+                    return False
+                return ("level 3" in combined or "level3" in combined or "geo level3" in combined or "geo level 3" in combined)
+
+            if "level 1" in t_clean or "level1" in t_clean:
+                if "level 1" in t_text or "level1" in t_text:
+                    return True
+                if "level 3" in t_text or "level3" in t_text or "level 2" in t_text or "level2" in t_text:
+                    return False
+                return ("level 1" in combined or "level1" in combined or "geo level1" in combined or "geo level 1" in combined)
+
+            # 2. Calendar / YearMonth / Date matching
+            is_date_field = any(k in t_clean for k in ["date", "calendar", "yearmonth", "year month"]) or bool(re.search(r"\d{4}-\d{2}", str(value or "")))
+            if is_date_field:
+                if "fiscal" in combined and "calendar" not in combined:
+                    return False
+                date_keywords = [
+                    "calendar yearmonth", "calendar[yearmonth]", "calendar year month",
+                    "yearmonth", "year month", "calendaryearmonth",
+                    "calendar date", "calendar[date]", "date", "calendar"
+                ]
+                if any(k in t_text for k in date_keywords):
+                    return True
+                if any(k in combined for k in date_keywords):
+                    return True
+
+            # 3. Check against caller tokens
+            if tokens:
+                for tok in tokens:
+                    tok_lower = tok.lower()
+                    if tok_lower in t_text or tok_lower in combined:
+                        return True
+
+            return t_clean in combined
+        except Exception:
+            return False
+
     def has_slicer(self, slicer_name: str) -> bool:
         """Check if a slicer or filter matching slicer_name exists on the current page."""
+        self.ensure_filters_pane_open()
         ctx = self._ctx()
         clean = slicer_name.lower().strip()
 
@@ -1042,23 +1300,16 @@ class PBIDashboardPage(BasePage):
 
         # 2. Check Filters Pane cards (both before and after selecting data visuals on canvas)
         try:
-            for tok in tokens:
-                card = self.page.locator(
-                    f"[data-automation-type='filterCard']:has([data-testid='filter-card-title']:has-text('{tok}')), "
-                    f"[data-automation-type='filterCard']:has(.textLabel:has-text('{tok}')), "
-                    f"[data-automation-type='filterCard']:has([aria-label*='{tok}' i])"
-                ).first
-                if card.count() > 0:
+            card_sel = "[data-automation-type='filterCard'], .filterCard, [class*='filterCard'], .card.categorical"
+            cards = self.page.locator(card_sel).all()
+            for c in cards:
+                if self._card_matches(c, slicer_name, tokens=tokens):
                     return True
 
             if self.select_visual(None):
-                for tok in tokens:
-                    card = self.page.locator(
-                        f"[data-automation-type='filterCard']:has([data-testid='filter-card-title']:has-text('{tok}')), "
-                        f"[data-automation-type='filterCard']:has(.textLabel:has-text('{tok}')), "
-                        f"[data-automation-type='filterCard']:has([aria-label*='{tok}' i])"
-                    ).first
-                    if card.count() > 0:
+                cards = self.page.locator(card_sel).all()
+                for c in cards:
+                    if self._card_matches(c, slicer_name, tokens=tokens):
                         return True
         except Exception:
             pass
@@ -1278,22 +1529,7 @@ class PBIDashboardPage(BasePage):
         ctx = self._ctx()
         try:
             # 1. Expand Filters Pane container if present and collapsed
-            expand_sel = (
-                "article.outspacePane button[aria-label*='Show/hide' i], "
-                "article.outspacePane .collapseIcon, "
-                "button[aria-label*='Expand Filters' i], "
-                "button[title*='Expand Filters' i], "
-                "button[aria-label*='Show/hide filter pane' i], "
-                ".filterPaneToggleBtn, "
-                "button.pbi-glyph-chevronright, "
-                "button.pbi-glyph-doublechevronright"
-            )
-            expand_btn = ctx.locator(expand_sel).first if ctx.locator(expand_sel).count() > 0 else self.page.locator(expand_sel).first
-            if expand_btn.count() > 0 and expand_btn.is_visible(timeout=800):
-                aria_exp = expand_btn.get_attribute("aria-expanded")
-                if aria_exp == "false":
-                    expand_btn.click(timeout=2_000)
-                    self.page.wait_for_timeout(400)
+            self.ensure_filters_pane_open()
 
             top_search_sel = (
                 "input[data-testid='search-bar-input'], "
@@ -1312,8 +1548,6 @@ class PBIDashboardPage(BasePage):
                 if top_search.count() > 0 and top_search.is_visible(timeout=500):
                     try:
                         top_search.fill("")
-                        self.page.wait_for_timeout(100)
-                        top_search.press("Escape")
                         self.page.wait_for_timeout(200)
                     except Exception:
                         pass
@@ -1330,71 +1564,18 @@ class PBIDashboardPage(BasePage):
                     except Exception:
                         pass
 
-            def _card_matches(card: Any, target_name: str) -> bool:
-                try:
-                    t_el = card.locator("[data-testid='filter-card-title'], .textLabel, .title").first
-                    t_text = (t_el.inner_text(timeout=300) if t_el.count() > 0 else "").strip().lower()
-                    aria = (card.get_attribute("aria-label") or "").strip().lower()
-                    title_attr = (card.get_attribute("title") or "").strip().lower()
-                    combined = f"{t_text} {aria} {title_attr}"
-
-                    t_clean = target_name.strip().lower().replace("[", " ").replace("]", " ")
-
-                    # 1. Level 3 vs Level 1 disambiguation
-                    if "level 3" in t_clean or "level3" in t_clean:
-                        # Direct title match for level 3
-                        if "level 3" in t_text or "level3" in t_text:
-                            return True
-                        if ("level 1" in t_text or "level1" in t_text or "level 2" in t_text or "level2" in t_text):
-                            return False
-                        return ("level 3" in combined or "level3" in combined or "geo level3" in combined or "geo level 3" in combined)
-
-                    if "level 1" in t_clean or "level1" in t_clean:
-                        # Direct title match for level 1
-                        if "level 1" in t_text or "level1" in t_text:
-                            return True
-                        if ("level 3" in t_text or "level3" in t_text or "level 2" in t_text or "level2" in t_text):
-                            return False
-                        return ("level 1" in combined or "level1" in combined or "geo level1" in combined or "geo level 1" in combined)
-
-                    # 2. Calendar / YearMonth / Date matching:
-                    # In Qlik to PBI migration, Calendar[Date] or Date maps to YearMonth or Calendar YearMonth
-                    is_date_field = any(k in t_clean for k in ["date", "calendar", "yearmonth", "year month"]) or bool(re.search(r"\d{4}-\d{2}", str(value)))
-                    if is_date_field:
-                        if "fiscal" in combined and "calendar" not in combined:
-                            return False
-                        date_keywords = [
-                            "calendar yearmonth", "calendar[yearmonth]", "calendar year month",
-                            "yearmonth", "year month", "calendaryearmonth",
-                            "calendar date", "calendar[date]", "date", "calendar"
-                        ]
-                        if any(k in t_text for k in date_keywords):
-                            return True
-                        if any(k in combined for k in date_keywords):
-                            return True
-
-                    # 3. Check against caller tokens
-                    for tok in tokens:
-                        tok_lower = tok.lower()
-                        if tok_lower in t_text or tok_lower in combined:
-                            return True
-
-                    return t_clean in combined
-                except Exception:
-                    return False
-
             def _find_card() -> Optional[Any]:
-                card_sel = "[data-automation-type='filterCard'], filter:has([data-testid='filter-card-title']), .card.categorical"
+                card_sel = "[data-automation-type='filterCard'], .filterCard, [class*='filterCard'], .card.categorical"
                 cards = ctx.locator(card_sel).all() if ctx.locator(card_sel).count() > 0 else self.page.locator(card_sel).all()
                 for c in cards:
                     try:
-                        if _card_matches(c, slicer_name):
+                        if self._card_matches(c, slicer_name, value=value, tokens=tokens):
                             try:
                                 c.scroll_into_view_if_needed(timeout=1_000)
                             except Exception:
                                 pass
                             t_el = c.locator("[data-testid='filter-card-title'], .textLabel, .title").first
-                            matched_title = t_el.inner_text(timeout=300) if t_el.count() > 0 else ""
+                            matched_title = (t_el.inner_text(timeout=300) if t_el.count() > 0 else "") or (t_el.text_content() if t_el.count() > 0 else "")
                             log.info(f"Matched filter card in Filters Pane: '{matched_title}' for '{slicer_name}'")
                             return c
                     except Exception:
@@ -1413,6 +1594,7 @@ class PBIDashboardPage(BasePage):
                     else:
                         log.info("Activating canvas primary data visual to reveal visual-level filters")
                         self.select_visual(None)
+                    self.page.wait_for_timeout(1_000)
                     filter_card = _find_card()
 
                 # 4. If not directly visible, search the Filters Pane top search bar
@@ -1439,7 +1621,7 @@ class PBIDashboardPage(BasePage):
                     _clear_top_search()
 
                 # 6. If still not found, probe other canvas data visuals (tables, charts)
-                if not filter_card:
+                if not filter_card and not target_visual:
                     log.info("Filter card not yet found on current visual; probing other canvas data visuals")
                     data_vis_sel = (
                         "visual-container:has([aria-roledescription*='table' i]), "
@@ -1453,12 +1635,12 @@ class PBIDashboardPage(BasePage):
                     for cand_vc in data_visual_candidates:
                         try:
                             cand_vc.scroll_into_view_if_needed()
-                            header = cand_vc.locator("[class*='visualTitle'], h3, [class*='header-title'], .visualHeader").first
+                            header = cand_vc.locator("[class*='visualTitle'], [class*='header-title'], h3, .visualHeader, .visualHeaderWrapper, .header-text").first
                             if header.count() > 0 and header.is_visible(timeout=500):
                                 header.click(timeout=1_500, force=True)
                             else:
-                                cand_vc.click(position={"x": 15, "y": 15}, timeout=1_500, force=True)
-                            self.page.wait_for_timeout(400)
+                                cand_vc.click(position={"x": 25, "y": 25}, timeout=1_500, force=True)
+                            self.page.wait_for_timeout(300)
 
                             s_lower = slicer_name.lower()
                             search_term = (
@@ -1478,32 +1660,35 @@ class PBIDashboardPage(BasePage):
 
                 if not filter_card:
                     _clear_top_search()
+                    self.deselect_all_visuals()
                     log.debug(f"No filter card matching '{slicer_name}' found in Filters Pane")
                     return False
 
                 filter_card.scroll_into_view_if_needed()
 
-                # 7. Expand card if collapsed (wait for content to be visible; no redundant re-collapse click)
+                # 7. Expand card if collapsed (wait for content to be visible)
                 collapse_btn = filter_card.locator(
-                    "button.collapse, button[aria-label*='Expand or collapse' i], button[aria-label*='expand' i], button.pbi-glyph-chevronright"
+                    "button.collapse, button[aria-label*='Expand or collapse' i], button[aria-label*='expand' i]"
                 ).first
                 if collapse_btn.count() > 0:
                     is_expanded = collapse_btn.get_attribute("aria-expanded") == "true"
                     if not is_expanded:
-                        collapse_btn.click(timeout=2_000, force=True)
+                        collapse_btn.click(timeout=1_500, force=True)
+                        log.info(f"Clicked collapse button to expand card '{slicer_name}'")
                         try:
-                            filter_card.locator(".filterContent, .categoricalFilterValues, filter-visual").first.wait_for(
-                                state="visible", timeout=1_500
+                            filter_card.locator(".filterContent:not([hidden]), [role='checkbox']").first.wait_for(
+                                state="visible", timeout=2_000
                             )
                         except Exception:
                             self.page.wait_for_timeout(400)
                 else:
                     try:
-                        filter_card.locator(".filterContent, .categoricalFilterValues, filter-visual").first.wait_for(
+                        filter_card.locator(".filterContent:not([hidden]), [role='checkbox']").first.wait_for(
                             state="visible", timeout=1_500
                         )
                     except Exception:
                         pass
+                self.page.wait_for_timeout(300)
 
                 # 8. Apply target values to checkboxes
                 vals = [v.strip() for v in str(value).split(",") if v.strip()]
@@ -1513,6 +1698,7 @@ class PBIDashboardPage(BasePage):
                     lambda v: f".row:has([title='{v}']) [role='checkbox']",
                     lambda v: f".row:has-text('{v}') [role='checkbox']",
                     lambda v: f"[role='checkbox']:has-text('{v}')",
+                    lambda v: f"[role='checkbox'][title='{v}']",
                     lambda v: f".slicerItemContainer:has-text('{v}') [role='checkbox']",
                     lambda v: f".categoricalFilterValues [role='checkbox']:has-text('{v}')",
                     lambda v: f"span.textLabel:has-text('{v}')",
@@ -1524,34 +1710,69 @@ class PBIDashboardPage(BasePage):
                 for single_val in vals:
                     clicked = False
 
-                    # Check if already visible in card without searching
-                    for fn in cb_selectors_template:
-                        cb = filter_card.locator(fn(single_val)).first
-                        if cb.count() > 0 and cb.is_visible(timeout=400):
-                            chk_el = None
-                            if cb.get_attribute("role") == "checkbox":
-                                chk_el = cb
-                            elif cb.locator("[role='checkbox']").count() > 0:
-                                chk_el = cb.locator("[role='checkbox']").first
-                            else:
-                                row_parent = cb.locator("xpath=ancestor::*[contains(@class, 'row') or contains(@class, 'slicerItemContainer') or @role='option'][1]")
-                                if row_parent.count() > 0 and row_parent.locator("[role='checkbox']").count() > 0:
-                                    chk_el = row_parent.locator("[role='checkbox']").first
+                    def _try_click_cb() -> bool:
+                        for fn in cb_selectors_template:
+                            cb = filter_card.locator(fn(single_val)).first
+                            if cb.count() > 0 and cb.is_visible(timeout=500):
+                                chk_el = None
+                                if cb.get_attribute("role") == "checkbox":
+                                    chk_el = cb
+                                elif cb.locator("[role='checkbox']").count() > 0:
+                                    chk_el = cb.locator("[role='checkbox']").first
+                                else:
+                                    row_parent = cb.locator("xpath=ancestor::*[contains(@class, 'row') or contains(@class, 'slicerItemContainer') or @role='option'][1]")
+                                    if row_parent.count() > 0 and row_parent.locator("[role='checkbox']").count() > 0:
+                                        chk_el = row_parent.locator("[role='checkbox']").first
 
-                            aria_checked = chk_el.get_attribute("aria-checked") if (chk_el and chk_el.count() > 0) else cb.get_attribute("aria-checked")
-                            if aria_checked != "true":
-                                click_target = chk_el if (chk_el and chk_el.count() > 0 and chk_el.is_visible(timeout=200)) else cb
-                                click_target.click(timeout=2_000, force=True)
-                                self.page.wait_for_timeout(300)
-                                log.info(f"Selected checkbox '{single_val}' in Filters Pane")
-                            else:
-                                log.info(f"Checkbox '{single_val}' already selected")
-                            clicked = True
-                            any_clicked = True
-                            break
+                                aria_checked = chk_el.get_attribute("aria-checked") if (chk_el and chk_el.count() > 0) else cb.get_attribute("aria-checked")
+                                if aria_checked != "true":
+                                    click_target = chk_el if (chk_el and chk_el.count() > 0 and chk_el.is_visible(timeout=300)) else cb
+                                    click_target.click(timeout=2_000, force=True)
+                                    self.page.wait_for_timeout(400)
+                                    log.info(f"Selected checkbox '{single_val}' in Filters Pane")
+                                else:
+                                    log.info(f"Checkbox '{single_val}' already selected")
+                                return True
+                        return False
 
-                    # If not visible directly, search inside filter card
+                    # 1. Check if directly visible without scrolling
+                    if _try_click_cb():
+                        clicked = True
+                        any_clicked = True
+
+                    # 2. If not visible directly, incrementally scroll the card container down
                     if not clicked:
+                        scroll_target = filter_card.locator(".scrollable-content, .slicer-content-wrapper, .visibleGroup, .scrollWrapper, div[style*='overflow']").first
+                        for _scroll_i in range(8):
+                            try:
+                                if scroll_target.count() > 0:
+                                    scroll_target.evaluate("el => el.scrollTop += 150")
+                                else:
+                                    filter_card.evaluate("el => { const sc = el.querySelector('[class*=\"scroll\"], [class*=\"visibleGroup\"]') || el; sc.scrollTop += 150; }")
+                                self.page.wait_for_timeout(250)
+                            except Exception:
+                                pass
+                            if _try_click_cb():
+                                clicked = True
+                                any_clicked = True
+                                break
+
+                    # 3. If still not found, try search inside the filter card (with hover to reveal search button)
+                    if not clicked:
+                        try:
+                            filter_card.hover()
+                            self.page.wait_for_timeout(200)
+                        except Exception:
+                            pass
+
+                        search_icon = filter_card.locator("button[aria-label*='Search' i], .searchBtn, i.pbi-glyph-search, [title*='Search' i]").first
+                        if search_icon.count() > 0 and search_icon.is_visible(timeout=300):
+                            try:
+                                search_icon.click(timeout=1_000, force=True)
+                                self.page.wait_for_timeout(300)
+                            except Exception:
+                                pass
+
                         search_input = filter_card.locator(
                             "input.searchInput, input[data-testid='filter-search-input'], input[type='search'], input[type='text'], input[placeholder*='Search' i]"
                         ).first
@@ -1561,40 +1782,21 @@ class PBIDashboardPage(BasePage):
                                 search_input.fill("")
                                 search_input.fill(single_val)
                                 search_input.press("Enter")
-                                self.page.wait_for_timeout(600)
-                            except Exception:
-                                pass
-
-                            for fn in cb_selectors_template:
-                                cb = filter_card.locator(fn(single_val)).first
-                                if cb.count() > 0 and cb.is_visible(timeout=2_500):
-                                    chk_el = None
-                                    if cb.get_attribute("role") == "checkbox":
-                                        chk_el = cb
-                                    elif cb.locator("[role='checkbox']").count() > 0:
-                                        chk_el = cb.locator("[role='checkbox']").first
-                                    else:
-                                        row_parent = cb.locator("xpath=ancestor::*[contains(@class, 'row') or contains(@class, 'slicerItemContainer') or @role='option'][1]")
-                                        if row_parent.count() > 0 and row_parent.locator("[role='checkbox']").count() > 0:
-                                            chk_el = row_parent.locator("[role='checkbox']").first
-
-                                    aria_checked = chk_el.get_attribute("aria-checked") if (chk_el and chk_el.count() > 0) else cb.get_attribute("aria-checked")
-                                    if aria_checked != "true":
-                                        click_target = chk_el if (chk_el and chk_el.count() > 0 and chk_el.is_visible(timeout=200)) else cb
-                                        click_target.click(timeout=2_000, force=True)
-                                        self.page.wait_for_timeout(300)
-                                        log.info(f"Selected checkbox '{single_val}' in Filters Pane (via search)")
-                                    else:
-                                        log.info(f"Checkbox '{single_val}' already selected")
+                                self.page.wait_for_timeout(500)
+                                if _try_click_cb():
                                     clicked = True
                                     any_clicked = True
-                                    break
-
-                            try:
                                 search_input.fill("")
+                                search_input.press("Enter")
                                 self.page.wait_for_timeout(200)
                             except Exception:
                                 pass
+
+                    # 4. Scroll container back to top for subsequent values
+                    try:
+                        filter_card.evaluate("el => { const sc = el.querySelector('[class*=\"scroll\"], [class*=\"visibleGroup\"]') || el; sc.scrollTop = 0; }")
+                    except Exception:
+                        pass
 
                     if not clicked:
                         log.warning(f"Could not locate checkbox for '{single_val}' in Filters Pane")
@@ -1605,16 +1807,20 @@ class PBIDashboardPage(BasePage):
                 if any_clicked:
                     self.page.wait_for_timeout(QLIK_FILTER_WAIT)
                     log.info(f"Filters Pane filter applied: {slicer_name} = {value}")
+                    self.deselect_all_visuals()
                     return True
                 else:
                     log.warning(f"No values could be selected for '{slicer_name}' in Filters Pane")
+                    self.deselect_all_visuals()
                     return False
 
             finally:
                 _clear_top_search()
+                self.deselect_all_visuals()
 
         except Exception as e:
             log.warning(f"Error applying filter via Filters Pane: {e}")
+            self.deselect_all_visuals()
             return False
 
     def clear_all_slicers(self) -> None:

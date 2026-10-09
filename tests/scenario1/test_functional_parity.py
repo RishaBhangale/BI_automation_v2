@@ -358,27 +358,22 @@ def test_navigation_and_buttons(tc, pbi_dashboard, config):
     baseline = pbi_dashboard.capture_page_baseline()
     assert len(baseline) > 0, f"{test_id}: PBI baseline is empty on '{target_page}'"
 
-    ctx = pbi_dashboard._ctx()
-    # Find button matching label or Revenue/Quantity measure buttons
     if button_label in ["Measure Toggle", "Measure"]:
-        btn = ctx.locator(
-            "button:has-text('Quantity'), [aria-label*='Quantity' i], .buttonSlicer:has-text('Quantity')"
-        ).first
-        if not btn.count() or not btn.is_visible(timeout=2_000):
-            btn = ctx.locator(
-                "button:has-text('Revenue'), [aria-label*='Revenue' i], .buttonSlicer:has-text('Revenue')"
-            ).first
+        toggled = pbi_dashboard.set_metric_toggle("Quantity")
+        assert toggled, (
+            f"{test_id} FAIL — Metric toggle 'Quantity' could not be found or clicked on PBI page '{target_page}'."
+        )
+        pbi_dashboard.page.wait_for_timeout(2_000)
     else:
+        ctx = pbi_dashboard._ctx()
         btn = ctx.locator(
             f"button:has-text('{button_label}'), [aria-label*='{button_label}' i], [title*='{button_label}' i]"
         ).first
-
-    assert btn.count() > 0 and btn.is_visible(timeout=3_000), (
-        f"{test_id} FAIL — Interactive button/toggle '{button_label}' not found or visible on PBI page '{target_page}'."
-    )
-
-    btn.click(timeout=3_000)
-    pbi_dashboard.page.wait_for_timeout(3_000)
+        assert btn.count() > 0 and btn.is_visible(timeout=3_000), (
+            f"{test_id} FAIL — Interactive button/toggle '{button_label}' not found or visible on PBI page '{target_page}'."
+        )
+        btn.click(timeout=3_000)
+        pbi_dashboard.page.wait_for_timeout(3_000)
 
     post_click = pbi_dashboard.capture_page_baseline()
     assert len(post_click) > 0, f"{test_id} FAIL — Post-click PBI capture returned 0 visuals on '{target_page}'"
@@ -390,13 +385,8 @@ def test_navigation_and_buttons(tc, pbi_dashboard, config):
 
     # Restore baseline if toggled measure
     if button_label in ["Measure Toggle", "Measure"]:
-        reset_btn = ctx.locator("button:has-text('Revenue'), [aria-label*='Revenue' i]").first
-        if reset_btn.count() > 0 and reset_btn.is_visible(timeout=1_000):
-            try:
-                reset_btn.click(timeout=2_000)
-                pbi_dashboard.page.wait_for_timeout(1_500)
-            except Exception:
-                pass
+        pbi_dashboard.set_metric_toggle("Revenue")
+        pbi_dashboard.page.wait_for_timeout(1_500)
 
     log.info(f"[PASS] {test_id}: Action '{button_label}' successfully verified on '{target_page}' ({len(changed)} visual(s) updated: {sorted(changed)})")
 
@@ -426,8 +416,13 @@ def test_cross_filter_behavior(tc, pbi_dashboard, config):
     baseline = pbi_dashboard.capture_page_baseline()
     assert len(baseline) > 0, f"{test_id}: Baseline is empty on '{pbi_page_name}'"
     ctx = pbi_dashboard._ctx()
+    vis_container = ctx.locator(f"visual-container:has-text('{chart_name}')").first
+    target_scope = vis_container if (vis_container.count() > 0 and vis_container.is_visible(timeout=1_500)) else ctx
 
-    bar = ctx.locator(
+    bar = target_scope.locator(
+        f"rect[aria-label*='{target_segment}' i], "
+        f"[data-automation-type*='chart-rect'][aria-label*='{target_segment}' i], "
+        f"path[aria-label*='{target_segment}' i], "
         f"[aria-label*='{target_segment}' i], "
         f"svg text:has-text('{target_segment}'), "
         f"[role='gridcell']:has-text('{target_segment}'), "
@@ -437,7 +432,7 @@ def test_cross_filter_behavior(tc, pbi_dashboard, config):
         f"{test_id} FAIL — Segment '{target_segment}' in visual '{chart_name}' not found on '{pbi_page_name}'."
     )
 
-    bar.click(timeout=3_000)
+    bar.click(timeout=3_000, force=True)
     pbi_dashboard.page.wait_for_timeout(3_000)
 
     post_click = pbi_dashboard.capture_page_baseline()
@@ -462,7 +457,7 @@ cat_g_cases = _load_test_cases("G")
 @pytest.mark.cat_g
 @pytest.mark.scenario1
 @pytest.mark.parametrize("tc", cat_g_cases, ids=[_tc_id(tc) for tc in cat_g_cases] if cat_g_cases else [])
-def test_filter_clear_restores_baseline(tc, qlik_dashboard, pbi_dashboard, config):
+def test_filter_clear_restores_baseline(tc, pbi_dashboard, config):
     """FP-G-*: Apply filter, clear it, verify return to baseline state."""
     test_id = tc.get("Test ID", "FP-G-001")
     pbi_page_name = tc.get("PBI Page Name") or "Overdue Opportunities ISG"

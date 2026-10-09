@@ -130,20 +130,30 @@ def persistent_browser_context(_playwright) -> Generator[BrowserContext, None, N
         no_viewport=True,
     )
 
-    # If the profile directory was just created or empty, seed cookies from legacy session files
-    for session_file in [QLIK_SESSION_FILE, PBI_SESSION_FILE]:
-        sf = Path(session_file)
-        if sf.exists():
-            try:
-                data = json.loads(sf.read_text(encoding="utf-8"))
-                cookies = data.get("cookies", [])
-                if cookies:
-                    ctx.add_cookies(cookies)
-                    log.info(f"Seeded {len(cookies)} cookies into profile from {sf.name}")
-            except Exception as e:
-                log.warning(f"Could not seed cookies from {sf}: {e}")
+    # Only seed cookies from legacy session files if the persistent context has NO cookies yet
+    current_cookies = ctx.cookies()
+    if not current_cookies:
+        for session_file in [QLIK_SESSION_FILE, PBI_SESSION_FILE]:
+            sf = Path(session_file)
+            if sf.exists():
+                try:
+                    data = json.loads(sf.read_text(encoding="utf-8"))
+                    cookies = data.get("cookies", [])
+                    if cookies:
+                        ctx.add_cookies(cookies)
+                        log.info(f"Seeded {len(cookies)} cookies into empty profile from {sf.name}")
+                except Exception as e:
+                    log.warning(f"Could not seed cookies from {sf}: {e}")
 
     yield ctx
+    try:
+        live_cookies = ctx.cookies()
+        if live_cookies:
+            Path(PBI_SESSION_FILE).write_text(
+                json.dumps({"cookies": live_cookies}, indent=2), encoding="utf-8"
+            )
+    except Exception:
+        pass
     ctx.close()
     log.info("Persistent browser context closed")
 

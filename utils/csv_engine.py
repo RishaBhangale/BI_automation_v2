@@ -234,6 +234,11 @@ class CSVEngine:
         for col_name, val in all_filters.items():
             if val is None:
                 continue
+            if col_name.lower().strip() in ["missing pn", "missing_pn"]:
+                pn_col = self._resolve_column("%Opportunity Product ID") or self._resolve_column("Product ID")
+                if pn_col:
+                    mask &= df[pn_col].isna()
+                continue
             resolved = self._resolve_column(col_name)
             if not resolved:
                 log.warning(f"Filter column '{col_name}' not found in dataset — skipping filter")

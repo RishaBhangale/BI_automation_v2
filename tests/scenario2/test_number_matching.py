@@ -107,33 +107,33 @@ def test_pbi_visual_matches_csv_source(tc, pbi_dashboard, csv_engine, config):
                 if k_clean not in ("Past Due", "Days To Close", "Missing PN"):
                     if v_clean.lower() in ("*", "all", "none", "any"):
                         csv_filters[k_clean] = None
+                    elif "," in v_clean:
+                        csv_filters[k_clean] = [x.strip() for x in v_clean.split(",") if x.strip()]
                     else:
                         csv_filters[k_clean] = v_clean
 
     # Track 2 Pipeline Hygiene is IDG-scoped: if 'isg' not in (pbi_page_name or '').lower(), set Business Group = 'IDG'
+    # Exception: Missing PN Opportunities belongs to SSG in the underlying dataset, so do not force IDG.
     # Respect explicit Business Group if already specified in Additional Filters
     if "Business Group" not in csv_filters:
-        if "isg" not in (pbi_page_name or "").lower():
+        if "isg" not in (pbi_page_name or "").lower() and "missing pn" not in (pbi_page_name or "").lower() and "overdue" not in (pbi_page_name or "").lower():
             csv_filters["Business Group"] = "IDG"
 
     # Set csv_filters['Open Pipe Flag']:
-    # - 'Past Open' when past_due_flag is True or 'overdue' in (pbi_page_name or '').lower()
-    # - 'To Go' when '7 days' in (pbi_page_name or '').lower() or 'missing pn' in (pbi_page_name or '').lower()
+    # - 'Past Open' when 'overdue' in (pbi_page_name or '').lower()
     # Respect explicit Open Pipe Flag if already specified in Additional Filters
     if "Open Pipe Flag" not in csv_filters:
-        if past_due_flag is True or "overdue" in (pbi_page_name or "").lower():
+        if "overdue" in (pbi_page_name or "").lower():
             csv_filters["Open Pipe Flag"] = "Past Open"
-        elif "7 days" in (pbi_page_name or "").lower() or "missing pn" in (pbi_page_name or "").lower():
-            csv_filters["Open Pipe Flag"] = "To Go"
 
     # Parse Calendar Filter
-    if cal_filter and "=" in str(cal_filter):
+    if cal_filter and str(cal_filter).lower() != "nan" and "=" in str(cal_filter):
         k, v = str(cal_filter).split("=", 1)
         csv_filters[k.strip()] = v.strip()
 
     # Parse GEO Filter
     geo_category_values = None
-    if geo_filter and "=" in str(geo_filter):
+    if geo_filter and str(geo_filter).lower() != "nan" and "=" in str(geo_filter):
         k, v = str(geo_filter).split("=", 1)
         regions = [r.strip() for r in v.split(",") if r.strip()]
         csv_filters[k.strip()] = regions
@@ -167,7 +167,7 @@ def test_pbi_visual_matches_csv_source(tc, pbi_dashboard, csv_engine, config):
         pbi_dashboard.set_metric_toggle(measure_name)
 
     # 6. Apply slicers on PBI defensively
-    if cal_filter and "=" in str(cal_filter):
+    if cal_filter and str(cal_filter).lower() != "nan" and "=" in str(cal_filter):
         k, v = str(cal_filter).split("=", 1)
         log.info(f"Applying slicer: {k.strip()} = {v.strip()}")
         try:
@@ -184,6 +184,9 @@ def test_pbi_visual_matches_csv_source(tc, pbi_dashboard, csv_engine, config):
             log.warning(f"Could not apply PBI slicer {k.strip()} = {v.strip()}: {e}")
 
     # 7. Extract displayed value from Power BI
+    pbi_dashboard.deselect_all_visuals()
+    if measure_name:
+        pbi_dashboard.set_metric_toggle(measure_name)
     log.info(f"Extracting visual value for target: '{visual_target}', categories: {geo_category_values}")
     pbi_raw = pbi_dashboard.extract_visual_value(
         visual_target=visual_target or measure_name,
